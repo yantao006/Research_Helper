@@ -1,0 +1,295 @@
+version: '1.0'
+description: 上市公司研究 prompt 路由规则：先识别行业，再选择通用 prompt 与行业专用 prompt 的组合。
+files:
+  generic_prompts: prompts.csv
+  industry_prompts: industry_prompts.csv
+placeholders:
+- '{company}'
+- '{ticker}'
+- '{date}'
+execution_profiles:
+  quick:
+    generic_ids:
+    - 1
+    - 6
+    - 7
+    - 12
+    industry_prompt_count: 3
+    industry_prompt_slots:
+    - economics
+    - catalyst
+    - valuation
+    notes: 适合做首轮速读：先抓公司本质、市场预期、催化剂和综合判断，再叠加行业关键分析。
+  standard:
+    generic_ids:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 10
+    - 12
+    industry_prompt_count: 4
+    industry_prompt_slots:
+    - economics
+    - moat
+    - catalyst
+    - valuation
+    notes: 适合常规公司研究；既保留通用框架，也保证行业关键指标被覆盖。
+  full:
+    generic_ids:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    industry_prompt_count: 6
+    industry_prompt_slots:
+    - all
+    notes: 适合正式研究备忘录或重点持仓候选。
+  monitoring:
+    generic_ids:
+    - 6
+    - 7
+    - 11
+    - 12
+    industry_prompt_count: 2
+    industry_prompt_slots:
+    - catalyst
+    - dashboard
+    notes: 适合财报季前后、事件跟踪和存量持仓复盘。
+industry_detection:
+  method: llm_first_then_keyword_fallback
+  instruction: 优先根据公司主营业务、收入结构和价值链位置进行语义分类；若分类置信度不足，再使用关键词兜底。
+  confidence_thresholds:
+    high: 0.75
+    medium: 0.6
+    low: 0.45
+  fallback_action: 当置信度 < 0.60 时，仅运行通用 prompts，并标记 manual_review=true。
+  categories:
+  - id: saas
+    label: SaaS / 软件
+    description: 以订阅软件、云服务或企业软件为核心收入来源。
+    positive_keywords:
+    - saas
+    - software
+    - subscription
+    - cloud
+    - crm
+    - erp
+    - hcm
+    - workflow
+    - observability
+    - cybersecurity
+    - devops
+    exclude_keywords:
+    - semiconductor
+    - foundry
+    - retail
+    examples:
+    - Salesforce
+    - ServiceNow
+    - HubSpot
+    - Atlassian
+    - Adobe
+    industry_prompt_ids:
+    - SAAS_1
+    - SAAS_2
+    - SAAS_3
+    - SAAS_4
+    - SAAS_5
+    - SAAS_6
+    slot_map:
+      economics: SAAS_1
+      moat: SAAS_2
+      financial_quality: SAAS_3
+      catalyst: SAAS_4
+      valuation: SAAS_5
+      dashboard: SAAS_6
+  - id: consumer
+    label: 消费 / 零售 / 品牌
+    description: 以品牌消费、零售渠道、可选消费或快消为核心。
+    positive_keywords:
+    - consumer
+    - retail
+    - brand
+    - apparel
+    - beverage
+    - beauty
+    - restaurant
+    - franchise
+    - same-store
+    exclude_keywords:
+    - software
+    - bank
+    examples:
+    - Nike
+    - Lululemon
+    - Costco
+    - Starbucks
+    - Pop Mart
+    industry_prompt_ids:
+    - CONSUMER_1
+    - CONSUMER_2
+    - CONSUMER_3
+    - CONSUMER_4
+    - CONSUMER_5
+    - CONSUMER_6
+    slot_map:
+      economics: CONSUMER_2
+      moat: CONSUMER_1
+      financial_quality: CONSUMER_3
+      catalyst: CONSUMER_4
+      valuation: CONSUMER_5
+      dashboard: CONSUMER_6
+  - id: semiconductor
+    label: 半导体
+    description: 处于设计、制造、设备、材料、IP、封测等半导体产业链环节。
+    positive_keywords:
+    - semiconductor
+    - chip
+    - fabless
+    - foundry
+    - wafer
+    - gpu
+    - cpu
+    - memory
+    - analog
+    - equipment
+    exclude_keywords:
+    - saas
+    - retail
+    examples:
+    - NVIDIA
+    - AMD
+    - TSMC
+    - ASML
+    - Applied Materials
+    industry_prompt_ids:
+    - SEMI_1
+    - SEMI_2
+    - SEMI_3
+    - SEMI_4
+    - SEMI_5
+    - SEMI_6
+    slot_map:
+      economics: SEMI_2
+      moat: SEMI_1
+      financial_quality: SEMI_3
+      catalyst: SEMI_4
+      valuation: SEMI_5
+      dashboard: SEMI_6
+  - id: internet_platform
+    label: 互联网平台
+    description: 平台连接多边参与者，收入主要来自广告、抽佣、交易服务或流量商业化。
+    positive_keywords:
+    - platform
+    - marketplace
+    - adtech
+    - social
+    - ecommerce
+    - take rate
+    - creator
+    - merchant
+    - gmv
+    exclude_keywords:
+    - bank
+    - foundry
+    examples:
+    - Meta
+    - Alphabet
+    - Uber
+    - DoorDash
+    - PDD
+    industry_prompt_ids:
+    - PLATFORM_1
+    - PLATFORM_2
+    - PLATFORM_3
+    - PLATFORM_4
+    - PLATFORM_5
+    - PLATFORM_6
+    slot_map:
+      economics: PLATFORM_2
+      moat: PLATFORM_1
+      financial_quality: PLATFORM_3
+      catalyst: PLATFORM_4
+      valuation: PLATFORM_5
+      dashboard: PLATFORM_6
+  - id: financials
+    label: 金融
+    description: 银行、保险、券商、资管、支付及其他金融服务。
+    positive_keywords:
+    - bank
+    - insurance
+    - brokerage
+    - asset management
+    - wealth
+    - payment
+    - loan
+    - nim
+    - aum
+    - premium
+    exclude_keywords:
+    - software
+    - retail
+    examples:
+    - JPMorgan
+    - AIA
+    - Goldman Sachs
+    - BlackRock
+    - Visa
+    industry_prompt_ids:
+    - FIN_1
+    - FIN_2
+    - FIN_3
+    - FIN_4
+    - FIN_5
+    - FIN_6
+    slot_map:
+      economics: FIN_1
+      moat: FIN_2
+      financial_quality: FIN_3
+      catalyst: FIN_4
+      valuation: FIN_5
+      dashboard: FIN_6
+routing_rules:
+- name: single_industry_company
+  condition: 主营业务和收入来源明显集中于单一行业，且分类置信度 >= 0.60
+  action: 运行所选 profile 的 generic_ids + 对应行业 slot_map 中需要的 industry prompts
+- name: multi_segment_company
+  condition: 公司横跨多个行业或存在两个以上重要业务板块
+  action: 优先按收入占比最大的主营行业选择 industry prompts；同时保留 generic ids [1,2,5,10,12]；若是控股型公司，建议在估值阶段使用分部估值思路。
+- name: conglomerate_or_holding
+  condition: 业务非常分散、单一行业 overlay 难以覆盖核心矛盾
+  action: 仅运行 generic prompts，并在最终结论中强调 SOTP、资本配置和管理层能力。
+- name: low_confidence_classification
+  condition: 行业分类置信度 < 0.60
+  action: 只运行 generic prompts，manual_review=true，并要求后续人工确认行业。
+recommended_workflows:
+  new_idea_screening:
+    profile: quick
+    purpose: 快速判断公司是否值得进入标准研究流程。
+  core_research:
+    profile: standard
+    purpose: 形成可讨论的初步投资结论。
+  deep_dive:
+    profile: full
+    purpose: 形成正式研究备忘录、重点公司深度报告。
+  earnings_monitoring:
+    profile: monitoring
+    purpose: 财报前后、重大事件或持仓跟踪。
+implementation_notes:
+- 所有 prompt 统一使用 {company}、{ticker}、{date} 三个占位符。
+- 运行顺序建议：先通用 prompts，再行业 prompts，最后做综合备忘录。
+- 当公司存在明显地域差异（中国 / 海外）或分部差异时，优先要求模型分业务、分地区拆解。
+- 对于估值与催化剂类 prompt，建议结合联网搜索与最新财报、业绩会纪要。
+- 行业 overlay 的目标不是替代通用框架，而是补齐该行业最关键的研究变量。

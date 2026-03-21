@@ -1,0 +1,12 @@
+.env
+.env.local
+.env.*.local
+__pycache__/
+*.pyc
+logs/
+output/
+.DS_Store
+node_modules/
+.next/
+.next_cache_*/
+*.tsbuildinfo

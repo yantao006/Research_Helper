@@ -1,0 +1,2 @@
+"""Batch research package."""
+
