@@ -92,3 +92,10 @@ def resolve_api_base(provider: ProviderConfig) -> str:
             return value.rstrip("/")
     return provider.api_base.rstrip("/")
 
+
+def is_production_env() -> bool:
+    for name in ("RESEARCH_ENV", "APP_ENV", "ENV", "NODE_ENV"):
+        value = os.getenv(name, "").strip().lower()
+        if value in {"prod", "production"}:
+            return True
+    return False

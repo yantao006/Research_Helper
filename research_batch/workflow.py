@@ -16,7 +16,7 @@ from research_batch.llm import (
     is_tool_not_open_error,
     summarize_http_error,
 )
-from research_batch.storage import render_prompt, sanitize_filename, write_output
+from research_batch.repositories import DocRepo, JobRepo, RunRepo
 
 
 def run_provider_test(
@@ -132,22 +132,36 @@ def process_company(
     request_timeout: int,
     enable_web_search: bool,
     force_rerun: bool,
+    doc_repo: DocRepo,
+    run_repo: RunRepo,
+    job_repo: JobRepo,
 ) -> bool:
     company = row["company"].strip()
     ticker = row["Ticker"].strip()
-    output_dir = output_root / f"{sanitize_filename(ticker)}_{report_date}"
+    job_id = job_repo.begin_company(company=company, ticker=ticker)
+    run_id = run_repo.begin_run(
+        company=company,
+        ticker=ticker,
+        report_date=report_date,
+        provider_name=provider.display_name,
+        model=model,
+    )
     logging.info("Processing company=%s ticker=%s", company, ticker)
     web_search_enabled = enable_web_search
 
     for prompt_row in prompts:
-        safe_question = sanitize_filename(prompt_row.question)
-        output_path = output_dir / f"{prompt_row.prompt_id}_{safe_question}.md"
-        if output_path.exists() and not force_rerun:
+        output_path = run_repo.build_output_path(
+            output_root=output_root,
+            ticker=ticker,
+            report_date=report_date,
+            prompt=prompt_row,
+        )
+        if run_repo.output_exists(output_path) and not force_rerun:
             logging.info("Skip existing output: %s", output_path)
             continue
 
-        rendered_prompt = render_prompt(
-            prompt_row.prompt,
+        rendered_prompt = doc_repo.render_prompt(
+            template=prompt_row.prompt,
             company=company,
             ticker=ticker,
             report_date=report_date,
@@ -162,6 +176,14 @@ def process_company(
                         prompt_row.question,
                         attempt,
                         max_retries,
+                    )
+                    job_repo.add_event(
+                        job_id=job_id,
+                        message=(
+                            f"request prompt_id={prompt_row.prompt_id}"
+                            f" question={prompt_row.question}"
+                            f" attempt={attempt}/{max_retries}"
+                        ),
                     )
                     response_json = (
                         call_openai(
@@ -202,8 +224,22 @@ def process_company(
                         answer=answer,
                         sources=sources,
                     )
-                    existed_before_write = output_path.exists()
-                    write_output(output_path, markdown, force_rerun=force_rerun)
+                    existed_before_write = run_repo.output_exists(output_path)
+                    run_repo.write_output(output_path, markdown, force_rerun=force_rerun)
+                    doc_repo.save_research_doc(
+                        run_id=run_id,
+                        company=company,
+                        ticker=ticker,
+                        report_date=report_date,
+                        prompt_id=prompt_row.prompt_id,
+                        question=prompt_row.question,
+                        answer_markdown=answer,
+                        sources=sources,
+                        provider_name=provider.display_name,
+                        model=model,
+                        output_path=str(output_path),
+                        markdown=markdown,
+                    )
                     if existed_before_write and force_rerun:
                         logging.info("Overwrote output (force rerun): %s", output_path)
                     else:
@@ -258,6 +294,12 @@ def process_company(
                 ticker,
                 prompt_row.prompt_id,
             )
+            run_repo.finish_run(
+                run_id=run_id,
+                success=False,
+                error_message="non_retryable_api_error",
+            )
+            job_repo.finish_company(job_id=job_id, success=False)
             return False
 
         if not success:
@@ -267,6 +309,13 @@ def process_company(
                 ticker,
                 prompt_row.prompt_id,
             )
+            run_repo.finish_run(
+                run_id=run_id,
+                success=False,
+                error_message=f"prompt_failed:{prompt_row.prompt_id}",
+            )
+            job_repo.finish_company(job_id=job_id, success=False)
             return False
+    run_repo.finish_run(run_id=run_id, success=True)
+    job_repo.finish_company(job_id=job_id, success=True)
     return True
-
