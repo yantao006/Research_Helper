@@ -7,6 +7,7 @@ type DocMeta = {
   date: string;
   provider: string;
   model: string;
+  industry: string;
 };
 
 export type ResearchDoc = {
@@ -22,6 +23,7 @@ export type ResearchRun = {
   runId: string;
   company: string;
   ticker: string;
+  industry: string;
   date: string;
   provider: string;
   model: string;
@@ -146,13 +148,15 @@ function parseMeta(lines: string[]): DocMeta {
     if (key === "date") meta.date = value;
     if (key === "provider") meta.provider = value;
     if (key === "model") meta.model = value;
+    if (key === "industry") meta.industry = value;
   }
   return {
     company: meta.company ?? "Unknown",
     ticker: meta.ticker ?? "Unknown",
     date: meta.date ?? "Unknown",
     provider: meta.provider ?? "Unknown",
-    model: meta.model ?? "Unknown"
+    model: meta.model ?? "Unknown",
+    industry: meta.industry ?? "未分类"
   };
 }
 
@@ -166,6 +170,19 @@ function parseSources(lines: string[]): Array<{ title: string; url: string }> {
     }
   }
   return items;
+}
+
+function extractPromptId(fileName: string): string {
+  const base = fileName.replace(/\.md$/i, "");
+  const match = base.match(/^([A-Za-z]+_\d+|\d+)_/);
+  if (match) {
+    return match[1];
+  }
+  const firstUnderscore = base.indexOf("_");
+  if (firstUnderscore > 0) {
+    return base.slice(0, firstUnderscore);
+  }
+  return base;
 }
 
 function parseDoc(filePath: string, fileName: string): ResearchDoc {
@@ -185,7 +202,7 @@ function parseDoc(filePath: string, fileName: string): ResearchDoc {
   const sourceLines = sourcesStart >= 0 ? lines.slice(sourcesStart + 1) : [];
   const sources = parseSources(sourceLines);
 
-  const id = fileName.split("_")[0] || "0";
+  const id = extractPromptId(fileName) || "0";
   return {
     id,
     question: title,
@@ -226,6 +243,7 @@ export function getResearchRuns(): ResearchRun[] {
       runId,
       company: displayCompany,
       ticker: first.meta.ticker,
+      industry: first.meta.industry,
       date: first.meta.date,
       provider: first.meta.provider,
       model: first.meta.model,
