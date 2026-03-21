@@ -7,6 +7,8 @@ import type { ResearchRun } from "@/lib/research";
 
 type Props = {
   runs: ResearchRun[];
+  initialQuery?: string;
+  researchJobsEnabled: boolean;
 };
 
 type SearchItem = {
@@ -15,6 +17,16 @@ type SearchItem = {
   market: string;
   researched: boolean;
   runId?: string;
+};
+
+type KeywordHit = {
+  runId: string;
+  company: string;
+  ticker: string;
+  docId: string;
+  question: string;
+  snippet: string;
+  score: number;
 };
 
 type JobState = {
@@ -79,12 +91,15 @@ function marketFromTicker(ticker: string): string {
   return "美股";
 }
 
-export default function HomeDashboard({ runs }: Props) {
+export default function HomeDashboard({ runs, initialQuery = "", researchJobsEnabled }: Props) {
   const router = useRouter();
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [searchItems, setSearchItems] = useState<SearchItem[]>([]);
+  const [keywordHits, setKeywordHits] = useState<KeywordHit[]>([]);
   const [searching, setSearching] = useState(false);
+  const [keywordSearching, setKeywordSearching] = useState(false);
   const [selectedItem, setSelectedItem] = useState<SearchItem | null>(null);
+  const [selectedKeywordHit, setSelectedKeywordHit] = useState<KeywordHit | null>(null);
   const [job, setJob] = useState<JobState | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [quotes, setQuotes] = useState<Record<string, QuoteState>>({});
@@ -128,30 +143,56 @@ export default function HomeDashboard({ runs }: Props) {
   const inferredTicker = useMemo(() => inferTickerFromInput(queryText), [queryText]);
 
   useEffect(() => {
+    setQuery(initialQuery);
+  }, [initialQuery]);
+
+  useEffect(() => {
     const q = query.trim();
     if (!q) {
       setSearchItems([]);
+      setKeywordHits([]);
       setSelectedItem(null);
+      setSelectedKeywordHit(null);
       setSearching(false);
+      setKeywordSearching(false);
       return;
     }
     const controller = new AbortController();
     setSearching(true);
+    setKeywordSearching(true);
     const timer = window.setTimeout(async () => {
       try {
-        const response = await fetch(`/api/company-search?q=${encodeURIComponent(q)}`, {
-          signal: controller.signal,
-        });
-        if (!response.ok) return;
-        const payload = (await response.json()) as { items: SearchItem[] };
-        const items = payload.items || [];
-        setSearchItems(items);
+        const [companyResp, keywordResp] = await Promise.all([
+          fetch(`/api/company-search?q=${encodeURIComponent(q)}`, {
+            signal: controller.signal,
+          }),
+          fetch(`/api/keyword-search?q=${encodeURIComponent(q)}`, {
+            signal: controller.signal,
+          }),
+        ]);
+        const companyItems = companyResp.ok
+          ? (((await companyResp.json()) as { items: SearchItem[] }).items || [])
+          : [];
+        const keywordItems = keywordResp.ok
+          ? (((await keywordResp.json()) as { items: KeywordHit[] }).items || [])
+          : [];
+        setSearchItems(companyItems);
+        setKeywordHits(keywordItems);
         setSelectedItem((prev) => {
-          if (!prev) return items[0] ?? null;
-          return items.find((item) => item.ticker === prev.ticker) || items[0] || null;
+          if (!prev) return companyItems[0] ?? null;
+          return companyItems.find((item) => item.ticker === prev.ticker) || companyItems[0] || null;
+        });
+        setSelectedKeywordHit((prev) => {
+          if (!prev) return keywordItems[0] ?? null;
+          return (
+            keywordItems.find(
+              (item) => item.runId === prev.runId && item.docId === prev.docId && item.question === prev.question
+            ) || keywordItems[0] || null
+          );
         });
       } finally {
         setSearching(false);
+        setKeywordSearching(false);
       }
     }, 220);
     return () => {
@@ -219,6 +260,7 @@ export default function HomeDashboard({ runs }: Props) {
   }, [latestRuns]);
 
   const startResearch = async (target: SearchItem | null = selectedItem) => {
+    if (!researchJobsEnabled) return;
     if (!target) return;
     setIsStarting(true);
     try {
@@ -257,15 +299,27 @@ export default function HomeDashboard({ runs }: Props) {
     router.push(`/company/${encodeURIComponent(runId)}`);
   };
 
+  const openKeywordResult = (target: KeywordHit | null = selectedKeywordHit) => {
+    if (!target) return;
+    router.push(`/company/${encodeURIComponent(target.runId)}?tab=${encodeURIComponent(target.docId)}`);
+  };
+
   const researchedCount = latestRuns.length;
-  const hitCount = searchItems.length;
+  const companyHitCount = searchItems.length;
+  const keywordHitCount = keywordHits.length;
+  const hitCount = companyHitCount + keywordHitCount;
   const canStartFromTicker = hasQuery && !selectedItem && Boolean(inferredTicker);
 
   const primaryButtonLabel = (() => {
     if (!hasQuery) return "开始搜索";
     if (selectedItem?.researched) return "查看调研结果";
-    if (selectedItem && !selectedItem.researched) return isStarting ? "启动中..." : "开始调研";
-    if (canStartFromTicker && inferredTicker) return isStarting ? "启动中..." : `调研 ${inferredTicker}`;
+    if (selectedItem && !selectedItem.researched) {
+      return researchJobsEnabled ? (isStarting ? "启动中..." : "开始调研") : "仅展示已调研";
+    }
+    if (selectedKeywordHit) return "查看关键词结果";
+    if (canStartFromTicker && inferredTicker) {
+      return researchJobsEnabled ? (isStarting ? "启动中..." : `调研 ${inferredTicker}`) : "仅展示已调研";
+    }
     return "请输入更准确关键词";
   })();
 
@@ -279,16 +333,24 @@ export default function HomeDashboard({ runs }: Props) {
       return;
     }
     if (selectedItem && !selectedItem.researched) {
-      void startResearch(selectedItem);
+      if (researchJobsEnabled) {
+        void startResearch(selectedItem);
+      }
+      return;
+    }
+    if (selectedKeywordHit) {
+      openKeywordResult(selectedKeywordHit);
       return;
     }
     if (canStartFromTicker && inferredTicker) {
-      void startResearch({
-        company: queryText,
-        ticker: inferredTicker,
-        market: marketFromTicker(inferredTicker),
-        researched: false,
-      });
+      if (researchJobsEnabled) {
+        void startResearch({
+          company: queryText,
+          ticker: inferredTicker,
+          market: marketFromTicker(inferredTicker),
+          researched: false,
+        });
+      }
     }
   };
 
@@ -323,7 +385,18 @@ export default function HomeDashboard({ runs }: Props) {
             <button
               type="button"
               className="home-search-go"
-              disabled={isStarting || (hasQuery && !selectedItem && !canStartFromTicker && !searching)}
+              disabled={
+                isStarting ||
+                (!researchJobsEnabled &&
+                  !selectedKeywordHit &&
+                  ((selectedItem && !selectedItem.researched) || (canStartFromTicker && !selectedItem))) ||
+                (hasQuery &&
+                  !selectedKeywordHit &&
+                  !selectedItem &&
+                  !canStartFromTicker &&
+                  !searching &&
+                  !keywordSearching)
+              }
               onClick={handlePrimaryAction}
             >
               {primaryButtonLabel}
@@ -332,6 +405,7 @@ export default function HomeDashboard({ runs }: Props) {
           <div className="home-kpis">
             <span>已调研 {researchedCount} 家</span>
             <span>最新更新 {latestDate}</span>
+            {!researchJobsEnabled ? <span>当前站点为公开只读模式</span> : null}
             {hasQuery ? <span>{searching ? "检索中..." : `匹配建议 ${hitCount} 条`}</span> : null}
           </div>
           <div className="home-quick-chips">
@@ -348,12 +422,61 @@ export default function HomeDashboard({ runs }: Props) {
           <div className="home-suggest-panel">
             <div className="home-suggest-head">
               <strong>搜索建议</strong>
-              <span className="meta">{searching ? "正在更新..." : `${hitCount} 条`}</span>
+              <span className="meta">
+                {searching || keywordSearching
+                  ? "正在更新..."
+                  : `公司 ${companyHitCount} 条 · 关键词 ${keywordHitCount} 条`}
+              </span>
             </div>
-            {searchItems.length === 0 ? (
+            {keywordHitCount > 0 ? (
+              <div className="home-keyword-panel">
+                <div className="home-keyword-head">
+                  <strong>关键词命中</strong>
+                  <span className="meta">{keywordHitCount} 条</span>
+                </div>
+                <div className="home-keyword-list">
+                  {keywordHits.slice(0, 6).map((hit) => (
+                    <button
+                      key={`${hit.runId}-${hit.docId}-${hit.question}`}
+                      type="button"
+                      className={`home-keyword-item ${
+                        selectedKeywordHit &&
+                        selectedKeywordHit.runId === hit.runId &&
+                        selectedKeywordHit.docId === hit.docId &&
+                        selectedKeywordHit.question === hit.question
+                          ? "is-active"
+                          : ""
+                      }`}
+                      onClick={() => {
+                        setSelectedKeywordHit(hit);
+                        setSelectedItem(null);
+                      }}
+                    >
+                      <div className="home-keyword-title">
+                        <strong>{hit.company}</strong>
+                        <span className="meta">{hit.ticker}</span>
+                      </div>
+                      <div className="home-keyword-question">{hit.question}</div>
+                      <div className="home-keyword-snippet">{hit.snippet}</div>
+                    </button>
+                  ))}
+                </div>
+                {selectedKeywordHit ? (
+                  <div className="home-suggest-action">
+                    <span className="meta">
+                      命中“{queryText}”的调研内容，可直接打开对应章节。
+                    </span>
+                    <button type="button" className="home-cta-btn" onClick={() => openKeywordResult(selectedKeywordHit)}>
+                      查看命中内容
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {searchItems.length === 0 && keywordHitCount === 0 ? (
               <div className="home-empty-suggest">
                 <div className="meta">未找到匹配公司，可尝试完整股票代码（示例：600519.SH / 09992.HK / AAPL）。</div>
-                {inferredTicker ? (
+                {inferredTicker && researchJobsEnabled ? (
                   <button
                     type="button"
                     className="home-cta-btn"
@@ -371,14 +494,17 @@ export default function HomeDashboard({ runs }: Props) {
                   </button>
                 ) : null}
               </div>
-            ) : (
+            ) : searchItems.length > 0 ? (
               <div className="home-suggest-list">
                 {searchItems.slice(0, 10).map((item) => (
                   <button
                     key={item.ticker}
                     type="button"
                     className={`home-suggest-item ${selectedItem?.ticker === item.ticker ? "is-active" : ""}`}
-                    onClick={() => setSelectedItem(item)}
+                    onClick={() => {
+                      setSelectedItem(item);
+                      setSelectedKeywordHit(null);
+                    }}
                   >
                     <div>
                       <strong>{item.company}</strong>
@@ -392,7 +518,7 @@ export default function HomeDashboard({ runs }: Props) {
                   </button>
                 ))}
               </div>
-            )}
+            ) : null}
             {selectedItem ? (
               <div className="home-suggest-action">
                 <span className="meta">
@@ -404,7 +530,7 @@ export default function HomeDashboard({ runs }: Props) {
                   <button type="button" className="home-cta-btn" onClick={() => openResearchedRun(selectedItem)}>
                     查看调研结果
                   </button>
-                ) : (
+                ) : researchJobsEnabled ? (
                   <button
                     type="button"
                     className="home-cta-btn"
@@ -413,6 +539,8 @@ export default function HomeDashboard({ runs }: Props) {
                   >
                     {isStarting ? "启动中..." : "开始调研并同步飞书"}
                   </button>
+                ) : (
+                  <span className="meta">当前为对外展示环境，暂不开放在线发起调研。</span>
                 )}
               </div>
             ) : null}
@@ -437,7 +565,10 @@ export default function HomeDashboard({ runs }: Props) {
                       <strong>{run.company}</strong>
                       <span className="home-discover-date">{run.date}</span>
                     </div>
-                    <div className="home-discover-meta">{run.ticker}</div>
+                    <div className="home-discover-meta">
+                      {run.ticker}
+                      {run.industry && run.industry !== "未分类" ? ` · ${run.industry}` : ""}
+                    </div>
                     <div className="home-discover-row">
                       <span className="home-discover-price">{formatPrice(quote?.price ?? null)}</span>
                       <span
@@ -492,6 +623,9 @@ export default function HomeDashboard({ runs }: Props) {
                 <div className="home-side-main">
                   <div className="home-side-company">{run.company}</div>
                   <div className="home-side-ticker">{run.ticker}</div>
+                  {run.industry && run.industry !== "未分类" ? (
+                    <div className="home-side-industry">{run.industry}</div>
+                  ) : null}
                 </div>
                 <div className="home-side-quote">
                   <div className="home-side-price">{formatPrice(quote?.price ?? null)}</div>

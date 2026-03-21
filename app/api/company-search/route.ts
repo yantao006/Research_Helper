@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getResearchRuns } from "@/lib/research";
 
+export const runtime = "nodejs";
+
 type Suggestion = {
   company: string;
   ticker: string;
@@ -37,76 +39,90 @@ function inferMarket(ticker: string): string {
 }
 
 async function searchYahoo(q: string): Promise<Array<{ company: string; ticker: string }>> {
-  const url = new URL("https://query1.finance.yahoo.com/v1/finance/search");
-  url.searchParams.set("q", q);
-  url.searchParams.set("quotesCount", "12");
-  url.searchParams.set("newsCount", "0");
-  url.searchParams.set("lang", "en-US");
-  url.searchParams.set("region", "US");
+  try {
+    const url = new URL("https://query1.finance.yahoo.com/v1/finance/search");
+    url.searchParams.set("q", q);
+    url.searchParams.set("quotesCount", "12");
+    url.searchParams.set("newsCount", "0");
+    url.searchParams.set("lang", "en-US");
+    url.searchParams.set("region", "US");
 
-  const response = await fetch(url.toString(), { cache: "no-store" });
-  if (!response.ok) {
+    const response = await fetch(url.toString(), {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      return [];
+    }
+    const payload = (await response.json()) as {
+      quotes?: Array<{ symbol?: string; shortname?: string; longname?: string; quoteType?: string }>;
+    };
+    const quotes = payload.quotes ?? [];
+    return quotes
+      .filter((item) => item.symbol && (item.quoteType === "EQUITY" || item.quoteType === "ETF"))
+      .map((item) => ({
+        company: (item.longname || item.shortname || item.symbol || "").trim(),
+        ticker: normalizeTicker((item.symbol || "").trim()),
+      }))
+      .filter((item) => item.company && item.ticker);
+  } catch {
     return [];
   }
-  const payload = (await response.json()) as {
-    quotes?: Array<{ symbol?: string; shortname?: string; longname?: string; quoteType?: string }>;
-  };
-  const quotes = payload.quotes ?? [];
-  return quotes
-    .filter((item) => item.symbol && (item.quoteType === "EQUITY" || item.quoteType === "ETF"))
-    .map((item) => ({
-      company: (item.longname || item.shortname || item.symbol || "").trim(),
-      ticker: normalizeTicker((item.symbol || "").trim()),
-    }))
-    .filter((item) => item.company && item.ticker);
 }
 
 async function searchEastmoney(q: string): Promise<Array<{ company: string; ticker: string }>> {
-  const url = new URL("https://searchapi.eastmoney.com/api/suggest/get");
-  url.searchParams.set("input", q);
-  url.searchParams.set("type", "14");
-  url.searchParams.set("token", "D43BF722C8E33BDC906FB84D85E326E8");
+  try {
+    const url = new URL("https://searchapi.eastmoney.com/api/suggest/get");
+    url.searchParams.set("input", q);
+    url.searchParams.set("type", "14");
+    url.searchParams.set("token", "D43BF722C8E33BDC906FB84D85E326E8");
 
-  const response = await fetch(url.toString(), { cache: "no-store" });
-  if (!response.ok) {
+    const response = await fetch(url.toString(), {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      return [];
+    }
+
+    const payload = (await response.json()) as {
+      QuotationCodeTable?: {
+        Data?: Array<{
+          Code?: string;
+          Name?: string;
+          Classify?: string;
+          SecurityTypeName?: string;
+        }>;
+      };
+    };
+
+    const data = payload.QuotationCodeTable?.Data ?? [];
+    return data
+      .filter((item) => {
+        const classify = (item.Classify || "").toLowerCase();
+        const secName = item.SecurityTypeName || "";
+        return (
+          classify === "astock" ||
+          classify === "hk" ||
+          classify === "usstock" ||
+          secName.includes("A股") ||
+          secName.includes("港股") ||
+          secName.includes("美股")
+        );
+      })
+      .map((item) => ({
+        company: (item.Name || "").trim(),
+        ticker: normalizeCnTicker((item.Code || "").trim()),
+      }))
+      .filter((item) => item.company && item.ticker);
+  } catch {
     return [];
   }
-
-  const payload = (await response.json()) as {
-    QuotationCodeTable?: {
-      Data?: Array<{
-        Code?: string;
-        Name?: string;
-        Classify?: string;
-        SecurityTypeName?: string;
-      }>;
-    };
-  };
-
-  const data = payload.QuotationCodeTable?.Data ?? [];
-  return data
-    .filter((item) => {
-      const classify = (item.Classify || "").toLowerCase();
-      const secName = item.SecurityTypeName || "";
-      return (
-        classify === "astock" ||
-        classify === "hk" ||
-        classify === "usstock" ||
-        secName.includes("A股") ||
-        secName.includes("港股") ||
-        secName.includes("美股")
-      );
-    })
-    .map((item) => ({
-      company: (item.Name || "").trim(),
-      ticker: normalizeCnTicker((item.Code || "").trim()),
-    }))
-    .filter((item) => item.company && item.ticker);
 }
 
 export async function GET(request: NextRequest) {
   const q = (request.nextUrl.searchParams.get("q") || "").trim();
-  if (!q) {
+  if (!q || q.length > 64) {
     return NextResponse.json({ items: [] as Suggestion[] });
   }
 
@@ -128,8 +144,7 @@ export async function GET(request: NextRequest) {
       runId: run.runId,
     }));
 
-  const remoteCn = await searchEastmoney(q);
-  const remoteYahoo = await searchYahoo(q);
+  const [remoteCn, remoteYahoo] = await Promise.all([searchEastmoney(q), searchYahoo(q)]);
   const remote = [...remoteCn, ...remoteYahoo];
   const merged = new Map<string, Suggestion>();
   for (const item of localItems) {

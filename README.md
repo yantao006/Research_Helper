@@ -164,6 +164,13 @@ python3 research_batch/main.py \
 - `--force-rerun`：即使结果文件已存在，也强制重新生成并覆盖
 - `--feishu-sync-test`：只测试飞书同步连通性与写入能力，不处理 `tasks.csv`
 - `--feishu-sync-only`：只把本地已有 `output` 结果同步到飞书，不调用模型
+- `--router-config`：启用行业路由配置（如 `prompt_router.yaml`）
+- `--industry-prompts`：指定行业专用 prompt CSV（默认读路由文件里的路径）
+- `--profile`：路由执行档位，支持 `quick/standard/full/monitoring`
+- `--industry-override`：强制行业分类（仅路由模式）
+- `--dry-run-plan`：仅输出每家公司最终要执行的 prompt 计划，不落盘
+- `--disable-seo-keyword-links`：关闭“二次提取关键词并追加站内软链接”的后处理
+- `--seo-keyword-limit`：每篇文档最多提取多少个 SEO 关键词（默认 8）
 
 示例：
 
@@ -176,7 +183,23 @@ python3 research_batch/main.py --provider zhipu --provider-test
 python3 research_batch/main.py --provider doubao --force-rerun
 python3 research_batch/main.py --feishu-sync-test
 python3 research_batch/main.py --feishu-sync-only --report-date 2026-03-21
+python3 research_batch/main.py --router-config prompt_router.yaml --profile standard --dry-run-plan
+python3 research_batch/main.py --router-config prompt_router.yaml --profile full --provider doubao
+python3 research_batch/main.py --provider doubao --force-rerun --seo-keyword-limit 10
 ```
+
+路由行为（Phase 2）：
+
+- `single_industry_company`：执行 profile 的通用 prompts + 行业 overlay
+- `multi_segment_company`：执行核心通用 prompts `1,2,5,10,12` + 主行业 overlay
+- `conglomerate_or_holding`：仅执行通用 prompts（不叠加行业）
+- `low_confidence_classification`：仅执行通用 prompts，且 `manual_review=true`
+
+路由行为（Phase 3 增强）：
+
+- 分类器支持输出 `primary + secondary + industry_weights`
+- `multi_segment_company` 会按权重选主行业，并混入次行业的一个关键 overlay prompt
+- `--dry-run-plan` 会额外打印 `industry_mix` 与 `secondary`，便于人工验路由
 
 建议先跑一次自检，再正式跑批量任务：
 
@@ -200,6 +223,7 @@ output/
 
 - 问题标题
 - 公司、Ticker、日期、模型
+- 行业（在路由模式下自动写入）
 - 模型回答
 - 联网搜索返回的来源链接（如果有）
 
@@ -295,6 +319,12 @@ npm run dev
 
 `http://localhost:3000`
 
+发布前可先跑一键体检：
+
+```bash
+npm run release:check
+```
+
 ### 页面说明
 
 - 首页：按运行目录展示公司卡片（公司、Ticker、日期、Provider）
@@ -303,6 +333,14 @@ npm run dev
 ### 强制重跑后查看
 
 如果你用了 `--force-rerun` 覆盖结果，刷新网页即可看到最新内容。网站会直接读取当前 `output` 目录。
+
+### 生产发布安全开关（新增）
+
+- `ENABLE_RESEARCH_JOBS=false`（推荐生产默认）
+  - 关闭在线“发起调研”接口与轮询接口
+  - 首页自动切换为只读展示模式，避免公网触发模型调用和本地写盘
+- `QUOTES_REVALIDATE_SECONDS=45`（可选）
+  - 控制行情接口缓存刷新间隔（秒）
 
 ## 12. 飞书同步（MVP）
 
@@ -361,6 +399,7 @@ python3 research_batch/main.py --feishu-sync-only --report-date 2026-03-21
 - `sync_key`
 - `company`
 - `ticker`
+- `industry`
 - `report_date`
 - `prompt_id`
 - `question`
@@ -370,3 +409,31 @@ python3 research_batch/main.py --feishu-sync-only --report-date 2026-03-21
 - `model`
 - `output_path`
 - `synced_at`
+
+## 13. 对外发布（Next.js 平台）
+
+### 推荐发布模式：只读展示
+
+适合直接部署到 Vercel/Next.js 平台。
+
+1. 在本地先完成调研并生成 `output/*` markdown  
+2. 将 `output` 目录一并提交（或接入你自己的持久化存储层）  
+3. 部署时设置：
+
+```env
+ENABLE_RESEARCH_JOBS=false
+QUOTES_REVALIDATE_SECONDS=45
+```
+
+4. 不要在公开展示站点注入模型密钥（如 `OPENAI_API_KEY` / `ARK_API_KEY`）
+
+### 为什么默认不开放在线调研
+
+当前在线调研流程依赖：
+
+- 写入 `tasks.csv`
+- 写入 `output/*`
+- 子进程执行 `python3 research_batch/main.py`
+
+这类长任务 + 本地文件写入模式，不适合直接放在无状态 Serverless 环境中公网开放。  
+如需公网在线调研，建议拆分为独立后端任务服务（队列 + 持久化存储 + 鉴权限流）。
