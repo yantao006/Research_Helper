@@ -40,7 +40,12 @@ Microsoft,MSFT,False,
 python3 --version
 ```
 
-这个项目默认只用 Python 标准库，不强制安装第三方依赖。
+默认运行（`--repo-backend auto`）只依赖 Python 标准库。  
+如果启用 Postgres 持久化（`--repo-backend postgres`），需要额外安装：
+
+```bash
+pip install "psycopg[binary]"
+```
 
 ## 3. 选择模型提供方
 
@@ -164,6 +169,13 @@ python3 research_batch/main.py \
 - `--force-rerun`：即使结果文件已存在，也强制重新生成并覆盖
 - `--feishu-sync-test`：只测试飞书同步连通性与写入能力，不处理 `tasks.csv`
 - `--feishu-sync-only`：只把本地已有 `output` 结果同步到飞书，不调用模型
+- `--feishu-async-flush-timeout`：程序退出时等待飞书异步队列刷新的最长秒数（默认 20）
+- `--feishu-sync-max-retries`：飞书异步任务单公司最大重试次数（默认 3）
+- `--feishu-sync-retry-delay`：飞书异步任务重试间隔秒数（默认 2）
+- `--feishu-dead-letter`：飞书异步失败任务的 JSONL 落盘路径（默认 `logs/feishu_sync_dead_letter.jsonl`）
+- `--repo-backend`：仓储后端，支持 `auto`（默认）/ `local` / `postgres` / `dual`
+- `--postgres-dsn`：Postgres 连接串；当 `--repo-backend=postgres|dual` 时必填（也可用 `POSTGRES_DSN` / `DATABASE_URL`）
+- `--dual-write-strict`：仅在 `dual` 模式下生效；开启后，Postgres 副写失败会直接中断任务
 - `--router-config`：启用行业路由配置（如 `prompt_router.yaml`）
 - `--industry-prompts`：指定行业专用 prompt CSV（默认读路由文件里的路径）
 - `--profile`：路由执行档位，支持 `quick/standard/full/monitoring`
@@ -171,6 +183,26 @@ python3 research_batch/main.py \
 - `--dry-run-plan`：仅输出每家公司最终要执行的 prompt 计划，不落盘
 - `--disable-seo-keyword-links`：关闭“二次提取关键词并追加站内软链接”的后处理
 - `--seo-keyword-limit`：每篇文档最多提取多少个 SEO 关键词（默认 8）
+
+`repo-backend=auto` 的行为（Phase 4）：
+
+- 本地环境默认走 `local`
+- 生产环境（`RESEARCH_ENV/APP_ENV/ENV/NODE_ENV=production`）默认强制走 `postgres`
+- 如果生产环境要临时放行非 postgres，用 `ALLOW_NON_POSTGRES_IN_PRODUCTION=true`（仅建议应急）
+
+飞书同步（Phase 5）：
+
+- 常规批处理主流程中，飞书同步改为异步后台执行，不阻塞公司调研主流程
+- 同步失败不会影响 `tasks.csv` 标记成功与否
+- 多次重试后仍失败会写入 dead-letter 文件，便于后续补偿重放
+- `--feishu-sync-only` 仍保留为同步直连模式，用于手动补偿
+
+关键词检索（Phase 6）：
+
+- 网站 `GET /api/keyword-search` 优先查询 Postgres（`rb_docs.answer_markdown + rb_seo_keywords`）
+- 若数据库未配置或查询异常，会自动回退到本地 `output` 文件扫描
+- `rb_seo_keywords` 在 Postgres schema 初始化时自动创建
+- 每次文档落库（`save_research_doc`）会自动从 Markdown 的 `## SEO 关键词` 段提取并更新关键词表
 
 示例：
 
@@ -183,6 +215,9 @@ python3 research_batch/main.py --provider zhipu --provider-test
 python3 research_batch/main.py --provider doubao --force-rerun
 python3 research_batch/main.py --feishu-sync-test
 python3 research_batch/main.py --feishu-sync-only --report-date 2026-03-21
+python3 research_batch/main.py --repo-backend auto --postgres-dsn "postgresql://user:pass@host:5432/db"
+python3 research_batch/main.py --repo-backend postgres --postgres-dsn "postgresql://user:pass@host:5432/db"
+python3 research_batch/main.py --repo-backend dual --postgres-dsn "postgresql://user:pass@host:5432/db"
 python3 research_batch/main.py --router-config prompt_router.yaml --profile standard --dry-run-plan
 python3 research_batch/main.py --router-config prompt_router.yaml --profile full --provider doubao
 python3 research_batch/main.py --provider doubao --force-rerun --seo-keyword-limit 10

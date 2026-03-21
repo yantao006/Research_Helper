@@ -3,17 +3,25 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from research_batch.config import REQUIRED_FEISHU_FIELDS, FeishuConfig, PromptRow, SyncDoc
 from research_batch.env_utils import is_falsy, require_env
-from research_batch.storage import parse_saved_markdown_for_sync, sanitize_filename
+from research_batch.repositories import DocRepo, RunRepo
+
+
+@dataclass
+class FeishuSyncTask:
+    row: dict[str, str]
 
 
 def resolve_feishu_config() -> FeishuConfig | None:
@@ -164,21 +172,32 @@ def sync_company_results_to_feishu(
     provider_name: str,
     model: str,
     request_timeout: int,
+    doc_repo: DocRepo,
+    run_repo: RunRepo,
 ) -> None:
     company = row["company"].strip()
     ticker = row["Ticker"].strip()
-    output_dir = output_root / f"{sanitize_filename(ticker)}_{report_date}"
+    output_dir = run_repo.build_output_dir(
+        output_root=output_root,
+        ticker=ticker,
+        report_date=report_date,
+    )
     if not output_dir.exists():
         logging.warning("Feishu sync skipped: output dir not found for %s %s", company, ticker)
         return
 
     docs: list[SyncDoc] = []
     for prompt in prompts:
-        file_path = output_dir / f"{prompt.prompt_id}_{sanitize_filename(prompt.question)}.md"
+        file_path = run_repo.build_output_path(
+            output_root=output_root,
+            ticker=ticker,
+            report_date=report_date,
+            prompt=prompt,
+        )
         if not file_path.exists():
             logging.warning("Feishu sync skipped missing file: %s", file_path)
             continue
-        answer, sources = parse_saved_markdown_for_sync(file_path)
+        answer, sources = doc_repo.parse_saved_markdown_for_sync(file_path)
         docs.append(
             SyncDoc(
                 prompt_id=prompt.prompt_id,
@@ -257,6 +276,172 @@ def sync_company_results_to_feishu(
             if created_id:
                 existing_by_key[sync_key] = created_id
             logging.info("Feishu created record sync_key=%s", sync_key)
+
+
+class FeishuSyncDispatcher:
+    def __init__(
+        self,
+        *,
+        config: FeishuConfig,
+        prompts: list[PromptRow],
+        report_date: str,
+        output_root: Path,
+        provider_name: str,
+        model: str,
+        request_timeout: int,
+        doc_repo: DocRepo,
+        run_repo: RunRepo,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+        dead_letter_path: Path | None = None,
+    ) -> None:
+        self.config = config
+        self.prompts = prompts
+        self.report_date = report_date
+        self.output_root = output_root
+        self.provider_name = provider_name
+        self.model = model
+        self.request_timeout = request_timeout
+        self.doc_repo = doc_repo
+        self.run_repo = run_repo
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.dead_letter_path = dead_letter_path
+
+        self._queue: queue.Queue[FeishuSyncTask | None] = queue.Queue()
+        self._worker: threading.Thread | None = None
+        self._started = False
+        self._closed = False
+        self._tenant_access_token: str | None = None
+        self._token_lock = threading.Lock()
+        self._enqueued = 0
+        self._succeeded = 0
+        self._failed = 0
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._worker = threading.Thread(
+            target=self._run_worker,
+            name="feishu-sync-worker",
+            daemon=True,
+        )
+        self._worker.start()
+        logging.info("Feishu async dispatcher started")
+
+    def enqueue(self, *, row: dict[str, str]) -> None:
+        if self._closed:
+            raise RuntimeError("FeishuSyncDispatcher already closed")
+        if not self._started:
+            self.start()
+        self._queue.put(FeishuSyncTask(row=dict(row)))
+        self._enqueued += 1
+        logging.info(
+            "Feishu sync enqueued company=%s ticker=%s queue_size=%s",
+            row.get("company", "").strip(),
+            row.get("Ticker", "").strip(),
+            self._queue.qsize(),
+        )
+
+    def close(self, *, flush_timeout: float = 20.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if not self._started:
+            return
+        self._queue.put(None)
+        worker = self._worker
+        if worker:
+            worker.join(timeout=max(0.0, flush_timeout))
+            if worker.is_alive():
+                pending = self._queue.qsize()
+                logging.warning(
+                    "Feishu async dispatcher close timeout. pending_tasks=%s", pending
+                )
+        logging.info(
+            "Feishu async dispatcher stopped enqueued=%s succeeded=%s failed=%s",
+            self._enqueued,
+            self._succeeded,
+            self._failed,
+        )
+
+    def _run_worker(self) -> None:
+        while True:
+            task = self._queue.get()
+            try:
+                if task is None:
+                    return
+                self._handle_task(task)
+            finally:
+                self._queue.task_done()
+
+    def _handle_task(self, task: FeishuSyncTask) -> None:
+        company = task.row.get("company", "").strip()
+        ticker = task.row.get("Ticker", "").strip()
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                tenant_access_token = self._get_tenant_access_token(refresh=(attempt > 1))
+                sync_company_results_to_feishu(
+                    config=self.config,
+                    tenant_access_token=tenant_access_token,
+                    row=task.row,
+                    prompts=self.prompts,
+                    report_date=self.report_date,
+                    output_root=self.output_root,
+                    provider_name=self.provider_name,
+                    model=self.model,
+                    request_timeout=self.request_timeout,
+                    doc_repo=self.doc_repo,
+                    run_repo=self.run_repo,
+                )
+                self._succeeded += 1
+                logging.info(
+                    "Feishu async sync completed company=%s ticker=%s attempt=%s/%s",
+                    company,
+                    ticker,
+                    attempt,
+                    self.max_retries,
+                )
+                return
+            except Exception as exc:
+                logging.exception(
+                    "Feishu async sync failed company=%s ticker=%s attempt=%s/%s",
+                    company,
+                    ticker,
+                    attempt,
+                    self.max_retries,
+                )
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)
+                else:
+                    self._failed += 1
+                    self._write_dead_letter(task=task, exc=exc)
+
+    def _get_tenant_access_token(self, *, refresh: bool) -> str:
+        with self._token_lock:
+            if refresh or not self._tenant_access_token:
+                self._tenant_access_token = get_feishu_tenant_access_token(
+                    self.config,
+                    timeout=self.request_timeout,
+                )
+            return self._tenant_access_token
+
+    def _write_dead_letter(self, *, task: FeishuSyncTask, exc: Exception) -> None:
+        if not self.dead_letter_path:
+            return
+        self.dead_letter_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "failed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "company": task.row.get("company", ""),
+            "ticker": task.row.get("Ticker", ""),
+            "report_date": self.report_date,
+            "provider": self.provider_name,
+            "model": self.model,
+            "error": str(exc),
+        }
+        with self.dead_letter_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def run_feishu_sync_test(*, config: FeishuConfig, request_timeout: int) -> None:

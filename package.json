@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "next": "^15.5.14",
+    "pg": "^8.20.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "react-markdown": "9.0.1",
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@types/node": "22.15.17",
+    "@types/pg": "^8.20.0",
     "@types/react": "19.0.12",
     "@types/react-dom": "19.0.5",
     "typescript": "5.8.3"

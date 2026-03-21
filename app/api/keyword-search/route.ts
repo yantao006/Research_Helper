@@ -1,17 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getResearchRuns } from "@/lib/research";
+import { searchKeywordHitsFromDb, type KeywordHit } from "@/lib/server/keyword-search-db";
+import { hasPostgresDsn } from "@/lib/server/postgres";
 
 export const runtime = "nodejs";
-
-type KeywordHit = {
-  runId: string;
-  company: string;
-  ticker: string;
-  docId: string;
-  question: string;
-  snippet: string;
-  score: number;
-};
 
 function stripMarkdown(raw: string): string {
   return raw
@@ -53,14 +45,9 @@ function buildSnippet(text: string, query: string): string {
   return `${prefix}${text.slice(start, end)}${suffix}`;
 }
 
-export async function GET(request: NextRequest) {
-  const q = (request.nextUrl.searchParams.get("q") || "").trim();
-  if (!q) {
-    return NextResponse.json({ items: [] as KeywordHit[] });
-  }
-
+function searchLocalKeywordHits(query: string): KeywordHit[] {
   const runs = getResearchRuns();
-  const qLower = q.toLowerCase();
+  const qLower = query.toLowerCase();
   const hits: KeywordHit[] = [];
 
   for (const run of runs) {
@@ -73,25 +60,40 @@ export async function GET(request: NextRequest) {
       if (!haystack.includes(qLower)) {
         continue;
       }
-
       const companyHits = countOccurrences(company.toLowerCase(), qLower);
       const tickerHits = countOccurrences(ticker.toLowerCase(), qLower);
       const questionHits = countOccurrences(question.toLowerCase(), qLower);
       const answerHits = countOccurrences(answerPlain.toLowerCase(), qLower);
       const score = companyHits * 8 + tickerHits * 7 + questionHits * 4 + answerHits;
-
       hits.push({
         runId: run.runId,
         company,
         ticker,
         docId: doc.id,
         question,
-        snippet: buildSnippet(answerPlain, q),
+        snippet: buildSnippet(answerPlain, query),
         score,
       });
     }
   }
-
   hits.sort((a, b) => b.score - a.score);
-  return NextResponse.json({ items: hits.slice(0, 20) });
+  return hits.slice(0, 20);
+}
+
+export async function GET(request: NextRequest) {
+  const q = (request.nextUrl.searchParams.get("q") || "").trim();
+  if (!q) {
+    return NextResponse.json({ items: [] as KeywordHit[] });
+  }
+
+  if (hasPostgresDsn()) {
+    try {
+      const items = await searchKeywordHitsFromDb(q, 20);
+      return NextResponse.json({ items });
+    } catch (error) {
+      console.error("keyword-search db query failed, fallback to local files", error);
+    }
+  }
+
+  return NextResponse.json({ items: searchLocalKeywordHits(q) });
 }

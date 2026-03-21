@@ -67,8 +67,47 @@ def parse_args() -> argparse.Namespace:
         help="Only sync existing local markdown results to Feishu and exit",
     )
     parser.add_argument(
+        "--feishu-async-flush-timeout",
+        type=float,
+        default=float(os.getenv("FEISHU_ASYNC_FLUSH_TIMEOUT", "20")),
+        help="Max seconds to wait for async Feishu worker flush on process exit",
+    )
+    parser.add_argument(
+        "--feishu-sync-max-retries",
+        type=int,
+        default=int(os.getenv("FEISHU_SYNC_MAX_RETRIES", "3")),
+        help="Async Feishu sync max retries per company task",
+    )
+    parser.add_argument(
+        "--feishu-sync-retry-delay",
+        type=float,
+        default=float(os.getenv("FEISHU_SYNC_RETRY_DELAY", "2")),
+        help="Async Feishu sync retry delay seconds",
+    )
+    parser.add_argument(
+        "--feishu-dead-letter",
+        default=os.getenv("FEISHU_SYNC_DEAD_LETTER", "logs/feishu_sync_dead_letter.jsonl"),
+        help="Path to write failed async Feishu sync tasks as JSONL",
+    )
+    parser.add_argument(
         "--only-ticker",
         default=None,
         help="Only process/sync one ticker (e.g. 09992.HK or AAPL)",
+    )
+    parser.add_argument(
+        "--repo-backend",
+        choices=("auto", "local", "postgres", "dual"),
+        default=os.getenv("REPO_BACKEND", "auto"),
+        help="Repository backend for tasks/runs/docs/jobs persistence",
+    )
+    parser.add_argument(
+        "--postgres-dsn",
+        default=os.getenv("POSTGRES_DSN") or os.getenv("DATABASE_URL"),
+        help="Postgres DSN, required when --repo-backend=postgres|dual",
+    )
+    parser.add_argument(
+        "--dual-write-strict",
+        action="store_true",
+        help="In dual mode, fail the run if Postgres secondary write/check fails",
     )
     return parser.parse_args()
