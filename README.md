@@ -462,6 +462,23 @@ QUOTES_REVALIDATE_SECONDS=45
 
 4. 不要在公开展示站点注入模型密钥（如 `OPENAI_API_KEY` / `ARK_API_KEY`）
 
+### main 分支自动触发部署
+
+仓库已内置工作流：
+
+- [vercel-deploy.yml](/Users/yantao006/workspace/oasis/04.Projects/Research_Helper/.github/workflows/vercel-deploy.yml)
+- 触发条件：`push main` 或手动 `workflow_dispatch`
+
+你只需要在 GitHub 仓库配置一个 Secret：
+
+- `VERCEL_TOKEN`（Vercel 个人令牌）
+
+配置后，每次 `main` 分支更新会自动执行：
+
+1. `vercel pull --environment=production`
+2. `vercel build --prod`
+3. `vercel deploy --prebuilt --prod`
+
 ### 为什么默认不开放在线调研
 
 当前在线调研流程依赖：
