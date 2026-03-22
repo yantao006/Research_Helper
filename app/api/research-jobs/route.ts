@@ -1,5 +1,5 @@
-import fs from "fs";
 import { spawn } from "child_process";
+import fs from "fs";
 import { NextRequest, NextResponse } from "next/server";
 import path from "path";
 import { isResearchAdminRequest } from "@/lib/server/admin-auth";
@@ -55,15 +55,34 @@ function isRateLimited(ip: string | null): boolean {
   return false;
 }
 
+function resolvePythonExecutable(): string {
+  const explicit = (process.env.PYTHON_BIN || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+
+  const candidates = [
+    path.join(process.cwd(), ".venv", "bin", "python"),
+    path.join(process.cwd(), ".venv", "bin", "python3"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return "python3";
+}
+
 export async function POST(request: NextRequest) {
-  if (!isResearchJobsEnabled()) {
+  const isAdmin = isResearchAdminRequest(request);
+  if (!isAdmin) {
+    return NextResponse.json({ error: "admin auth required" }, { status: 401 });
+  }
+  if (!isResearchJobsEnabled() && !isAdmin) {
     return NextResponse.json(
       { error: "research job endpoint is disabled in this environment" },
       { status: 403 }
     );
-  }
-  if (!isResearchAdminRequest(request)) {
-    return NextResponse.json({ error: "admin auth required" }, { status: 401 });
   }
   if (isRateLimited(request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null)) {
     return NextResponse.json({ error: "too many requests" }, { status: 429 });
@@ -100,9 +119,8 @@ export async function POST(request: NextRequest) {
   const job = createJob({ company, ticker, provider, reportDate });
   updateJob(job.id, { status: "running" });
 
+  const pythonBin = resolvePythonExecutable();
   const scriptPath = path.join(process.cwd(), "research_batch", "main.py");
-  const routerConfigPath = path.join(process.cwd(), "prompt_router.yaml");
-  const industryPromptsPath = path.join(process.cwd(), "industry_prompts.csv");
   const cliArgs = [
     scriptPath,
     "--provider",
@@ -115,15 +133,9 @@ export async function POST(request: NextRequest) {
   if (forceRerun) {
     cliArgs.push("--force-rerun");
   }
-  if (fs.existsSync(routerConfigPath)) {
-    cliArgs.push("--router-config", "prompt_router.yaml");
-    if (fs.existsSync(industryPromptsPath)) {
-      cliArgs.push("--industry-prompts", "industry_prompts.csv");
-    }
-    cliArgs.push("--profile", "standard");
-  }
+  appendLog(job.id, `Using python executable: ${pythonBin}`);
   const child = spawn(
-    "python3",
+    pythonBin,
     cliArgs,
     {
       cwd: process.cwd(),

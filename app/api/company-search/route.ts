@@ -1,4 +1,6 @@
+import fs from "fs";
 import { NextRequest, NextResponse } from "next/server";
+import path from "path";
 import { getResearchRuns } from "@/lib/research";
 
 export const runtime = "nodejs";
@@ -10,6 +12,87 @@ type Suggestion = {
   researched: boolean;
   runId?: string;
 };
+
+const TASKS_CSV = path.join(process.cwd(), "tasks.csv");
+
+function parseCsvLine(line: string): string[] {
+  const cells: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (ch === "," && !inQuotes) {
+      cells.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  cells.push(current);
+  return cells;
+}
+
+function includesNormalized(text: string, q: string): boolean {
+  return text.toLowerCase().includes(q.toLowerCase());
+}
+
+function readLocalTaskSuggestions(q: string): Array<{ company: string; ticker: string }> {
+  if (!fs.existsSync(TASKS_CSV)) {
+    return [];
+  }
+  try {
+    const raw = fs.readFileSync(TASKS_CSV, "utf-8");
+    const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    if (lines.length <= 1) {
+      return [];
+    }
+    const headers = parseCsvLine(lines[0]).map((item) => item.trim());
+    const companyIdx = headers.indexOf("company");
+    const tickerIdx = headers.indexOf("Ticker");
+    if (companyIdx < 0 || tickerIdx < 0) {
+      return [];
+    }
+    const items: Array<{ company: string; ticker: string }> = [];
+    for (let i = 1; i < lines.length; i += 1) {
+      const cells = parseCsvLine(lines[i]);
+      const company = (cells[companyIdx] || "").trim();
+      const ticker = normalizeCnTicker((cells[tickerIdx] || "").trim());
+      const haystack = `${company} ${ticker}`;
+      if (!company || !ticker || !includesNormalized(haystack, q)) {
+        continue;
+      }
+      items.push({ company, ticker });
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
 
 function normalizeTicker(raw: string): string {
   const t = raw.toUpperCase().trim();
@@ -126,7 +209,12 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ items: [] as Suggestion[] });
   }
 
-  const runs = await getResearchRuns();
+  const [runs, localTaskItems, remoteCn, remoteYahoo] = await Promise.all([
+    withTimeout(getResearchRuns(), 1200, []),
+    Promise.resolve(readLocalTaskSuggestions(q)),
+    searchEastmoney(q),
+    searchYahoo(q),
+  ]);
   const researchedByTicker = new Map(
     runs.map((run) => [run.ticker.toUpperCase(), { runId: run.runId, company: run.company }])
   );
@@ -134,7 +222,7 @@ export async function GET(request: NextRequest) {
   const localItems: Suggestion[] = runs
     .filter((run) => {
       const text = `${run.company} ${run.ticker}`.toLowerCase();
-      return text.includes(q.toLowerCase());
+      return includesNormalized(text, q);
     })
     .map((run) => ({
       company: run.company,
@@ -144,11 +232,26 @@ export async function GET(request: NextRequest) {
       runId: run.runId,
     }));
 
-  const [remoteCn, remoteYahoo] = await Promise.all([searchEastmoney(q), searchYahoo(q)]);
+  const taskItems: Suggestion[] = localTaskItems.map((item) => {
+    const researched = researchedByTicker.get(item.ticker.toUpperCase());
+    return {
+      company: researched?.company || item.company,
+      ticker: item.ticker,
+      market: inferMarket(item.ticker),
+      researched: Boolean(researched),
+      runId: researched?.runId,
+    };
+  });
+
   const remote = [...remoteCn, ...remoteYahoo];
   const merged = new Map<string, Suggestion>();
   for (const item of localItems) {
     merged.set(item.ticker.toUpperCase(), item);
+  }
+  for (const item of taskItems) {
+    const key = item.ticker.toUpperCase();
+    if (merged.has(key)) continue;
+    merged.set(key, item);
   }
   for (const item of remote) {
     const key = item.ticker.toUpperCase();

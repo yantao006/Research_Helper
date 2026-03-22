@@ -41,9 +41,9 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const query = await searchParams;
   const runs = await getCachedResearchRuns();
   const initialQuery = (query.kw || query.q || "").trim();
-  const researchJobsEnabled = isResearchJobsEnabled();
   const adminConfigured = isResearchAdminConfigured();
   const canManageResearch = adminConfigured && (await getResearchAdminSession());
+  const researchJobsEnabled = isResearchJobsEnabled() || canManageResearch;
   const siteUrl = getSiteUrl();
   const websiteJsonLd = JSON.stringify({
     "@context": "https://schema.org",
