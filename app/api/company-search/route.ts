@@ -126,7 +126,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ items: [] as Suggestion[] });
   }
 
-  const runs = getResearchRuns();
+  const runs = await getResearchRuns();
   const researchedByTicker = new Map(
     runs.map((run) => [run.ticker.toUpperCase(), { runId: run.runId, company: run.company }])
   );

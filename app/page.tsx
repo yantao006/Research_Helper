@@ -10,14 +10,16 @@ type HomePageProps = {
 
 export default async function HomePage({ searchParams }: HomePageProps) {
   const query = await searchParams;
-  const runs = getResearchRuns();
+  const runs = await getResearchRuns();
   const initialQuery = (query.kw || query.q || "").trim();
   const researchJobsEnabled = isResearchJobsEnabled();
 
   return (
     <main className="container">
       {runs.length === 0 ? (
-        <div className="empty">当前没有找到研究结果。请先运行批量脚本生成 output/*.md 文件。</div>
+        <div className="empty">
+          当前没有找到研究结果。请先运行批量调研脚本，或检查生产环境是否已配置并连通 Postgres 数据源。
+        </div>
       ) : (
         <HomeDashboard
           runs={runs}

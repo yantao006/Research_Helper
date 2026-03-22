@@ -45,8 +45,8 @@ function buildSnippet(text: string, query: string): string {
   return `${prefix}${text.slice(start, end)}${suffix}`;
 }
 
-function searchLocalKeywordHits(query: string): KeywordHit[] {
-  const runs = getResearchRuns();
+async function searchLocalKeywordHits(query: string): Promise<KeywordHit[]> {
+  const runs = await getResearchRuns();
   const qLower = query.toLowerCase();
   const hits: KeywordHit[] = [];
 
@@ -95,5 +95,5 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  return NextResponse.json({ items: searchLocalKeywordHits(q) });
+  return NextResponse.json({ items: await searchLocalKeywordHits(q) });
 }

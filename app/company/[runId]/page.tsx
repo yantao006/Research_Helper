@@ -214,7 +214,7 @@ function extractMarkdownToc(markdown: string): TocItem[] {
 export default async function CompanyPage({ params, searchParams }: PageProps) {
   const { runId } = await params;
   const query = await searchParams;
-  const run = getResearchRun(decodeURIComponent(runId));
+  const run = await getResearchRun(decodeURIComponent(runId));
 
   if (!run) {
     notFound();

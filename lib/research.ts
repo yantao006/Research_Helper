@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { getPostgresPool, hasPostgresDsn } from "@/lib/server/postgres";
 
 type DocMeta = {
   company: string;
@@ -30,8 +31,34 @@ export type ResearchRun = {
   docs: ResearchDoc[];
 };
 
+type DbDocRow = {
+  company: string;
+  ticker: string;
+  report_date: string;
+  prompt_id: string;
+  question: string;
+  answer_markdown: string;
+  sources_json: unknown;
+  provider: string;
+  model: string;
+  output_path: string;
+  markdown: string;
+};
+
+type DbTaskRow = {
+  ticker: string;
+  company: string;
+  extra: unknown;
+};
+
+type TaskLookup = {
+  companyByTicker: Map<string, string>;
+  industryByTicker: Map<string, string>;
+};
+
 const OUTPUT_ROOT = path.join(process.cwd(), "output");
 const TASKS_CSV = path.join(process.cwd(), "tasks.csv");
+
 const CHINA_TICKER_CN_NAME: Record<string, string> = {
   "01357.HK": "美图公司",
   "02097.HK": "美的集团",
@@ -77,58 +104,51 @@ function parseCsvLine(line: string): string[] {
   return cells;
 }
 
-function readTaskCompanyByTicker(): Map<string, string> {
-  const mapping = new Map<string, string>();
-  if (!fs.existsSync(TASKS_CSV)) {
-    return mapping;
+function parseExtraObject(raw: unknown): Record<string, string> {
+  if (!raw) {
+    return {};
   }
-  const raw = fs.readFileSync(TASKS_CSV, "utf-8");
-  const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  if (lines.length === 0) {
-    return mapping;
-  }
-
-  const headers = parseCsvLine(lines[0]).map((h) => h.trim());
-  const companyIdx = headers.findIndex((h) => h === "company");
-  const tickerIdx = headers.findIndex((h) => h === "Ticker");
-  if (companyIdx < 0 || tickerIdx < 0) {
-    return mapping;
-  }
-
-  for (let i = 1; i < lines.length; i += 1) {
-    const cells = parseCsvLine(lines[i]);
-    const company = (cells[companyIdx] ?? "").trim();
-    const ticker = (cells[tickerIdx] ?? "").trim().toUpperCase();
-    if (!company || !ticker) {
-      continue;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return Object.fromEntries(
+          Object.entries(parsed).map(([k, v]) => [String(k), v == null ? "" : String(v)])
+        );
+      }
+      return {};
+    } catch {
+      return {};
     }
-    mapping.set(ticker, company);
   }
-  return mapping;
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>).map(([k, v]) => [String(k), v == null ? "" : String(v)])
+    );
+  }
+  return {};
 }
 
-function chooseDisplayCompanyName(ticker: string, metaCompany: string, taskCompany: string | undefined): string {
-  if (!isChinaMarketTicker(ticker)) {
-    return metaCompany;
-  }
-  const canonicalTicker = ticker.toUpperCase();
-  if (taskCompany && hasChinese(taskCompany)) {
-    return taskCompany;
-  }
-  if (hasChinese(metaCompany)) {
-    return metaCompany;
-  }
-  if (CHINA_TICKER_CN_NAME[canonicalTicker]) {
-    return CHINA_TICKER_CN_NAME[canonicalTicker];
-  }
-  return taskCompany || metaCompany;
+function sanitizeRunPart(value: string): string {
+  const sanitized = value.trim().replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "");
+  return sanitized || "untitled";
 }
 
-function readMarkdownFiles(dirPath: string): string[] {
-  return fs
-    .readdirSync(dirPath)
-    .filter((name) => name.endsWith(".md"))
-    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
+function toRunId(ticker: string, reportDate: string): string {
+  return `${sanitizeRunPart(ticker)}_${reportDate}`;
+}
+
+function extractPromptId(fileName: string): string {
+  const base = fileName.replace(/\.md$/i, "");
+  const match = base.match(/^([A-Za-z]+_\d+|\d+)_/);
+  if (match) {
+    return match[1];
+  }
+  const firstUnderscore = base.indexOf("_");
+  if (firstUnderscore > 0) {
+    return base.slice(0, firstUnderscore);
+  }
+  return base;
 }
 
 function parseMeta(lines: string[]): DocMeta {
@@ -156,7 +176,7 @@ function parseMeta(lines: string[]): DocMeta {
     date: meta.date ?? "Unknown",
     provider: meta.provider ?? "Unknown",
     model: meta.model ?? "Unknown",
-    industry: meta.industry ?? "未分类"
+    industry: meta.industry ?? "未分类",
   };
 }
 
@@ -170,19 +190,6 @@ function parseSources(lines: string[]): Array<{ title: string; url: string }> {
     }
   }
   return items;
-}
-
-function extractPromptId(fileName: string): string {
-  const base = fileName.replace(/\.md$/i, "");
-  const match = base.match(/^([A-Za-z]+_\d+|\d+)_/);
-  if (match) {
-    return match[1];
-  }
-  const firstUnderscore = base.indexOf("_");
-  if (firstUnderscore > 0) {
-    return base.slice(0, firstUnderscore);
-  }
-  return base;
 }
 
 function parseDoc(filePath: string, fileName: string): ResearchDoc {
@@ -209,11 +216,78 @@ function parseDoc(filePath: string, fileName: string): ResearchDoc {
     answer,
     sources,
     meta,
-    fileName
+    fileName,
   };
 }
 
-export function getResearchRuns(): ResearchRun[] {
+function readMarkdownFiles(dirPath: string): string[] {
+  return fs
+    .readdirSync(dirPath)
+    .filter((name) => name.endsWith(".md"))
+    .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
+}
+
+function readTaskLookupFromCsv(): TaskLookup {
+  const companyByTicker = new Map<string, string>();
+  const industryByTicker = new Map<string, string>();
+  if (!fs.existsSync(TASKS_CSV)) {
+    return { companyByTicker, industryByTicker };
+  }
+
+  const raw = fs.readFileSync(TASKS_CSV, "utf-8");
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length === 0) {
+    return { companyByTicker, industryByTicker };
+  }
+
+  const headers = parseCsvLine(lines[0]).map((h) => h.trim());
+  const companyIdx = headers.findIndex((h) => h === "company");
+  const tickerIdx = headers.findIndex((h) => h === "Ticker");
+  const industryIdx = headers.findIndex((h) => h === "industry");
+
+  if (companyIdx < 0 || tickerIdx < 0) {
+    return { companyByTicker, industryByTicker };
+  }
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const cells = parseCsvLine(lines[i]);
+    const company = (cells[companyIdx] ?? "").trim();
+    const ticker = (cells[tickerIdx] ?? "").trim().toUpperCase();
+    const industry = industryIdx >= 0 ? (cells[industryIdx] ?? "").trim() : "";
+    if (!ticker) continue;
+    if (company) {
+      companyByTicker.set(ticker, company);
+    }
+    if (industry) {
+      industryByTicker.set(ticker, industry);
+    }
+  }
+
+  return { companyByTicker, industryByTicker };
+}
+
+function chooseDisplayCompanyName(
+  ticker: string,
+  metaCompany: string,
+  taskCompany: string | undefined
+): string {
+  if (!isChinaMarketTicker(ticker)) {
+    return metaCompany;
+  }
+  const canonicalTicker = ticker.toUpperCase();
+  if (taskCompany && hasChinese(taskCompany)) {
+    return taskCompany;
+  }
+  if (hasChinese(metaCompany)) {
+    return metaCompany;
+  }
+  if (CHINA_TICKER_CN_NAME[canonicalTicker]) {
+    return CHINA_TICKER_CN_NAME[canonicalTicker];
+  }
+  return taskCompany || metaCompany;
+}
+
+async function getResearchRunsFromLocal(): Promise<ResearchRun[]> {
   if (!fs.existsSync(OUTPUT_ROOT)) {
     return [];
   }
@@ -224,7 +298,7 @@ export function getResearchRuns(): ResearchRun[] {
     .map((entry) => entry.name)
     .sort((a, b) => b.localeCompare(a, "en"));
 
-  const taskCompanyByTicker = readTaskCompanyByTicker();
+  const taskLookup = readTaskLookupFromCsv();
   const runs: ResearchRun[] = [];
   for (const runId of runDirs) {
     const dirPath = path.join(OUTPUT_ROOT, runId);
@@ -234,27 +308,201 @@ export function getResearchRuns(): ResearchRun[] {
     }
     const docs = mdFiles.map((fileName) => parseDoc(path.join(dirPath, fileName), fileName));
     const first = docs[0];
+    const ticker = first.meta.ticker.toUpperCase();
     const displayCompany = chooseDisplayCompanyName(
-      first.meta.ticker,
+      ticker,
       first.meta.company,
-      taskCompanyByTicker.get(first.meta.ticker.toUpperCase())
+      taskLookup.companyByTicker.get(ticker)
     );
+    const industry = taskLookup.industryByTicker.get(ticker) || first.meta.industry || "未分类";
     runs.push({
       runId,
       company: displayCompany,
       ticker: first.meta.ticker,
-      industry: first.meta.industry,
+      industry,
       date: first.meta.date,
       provider: first.meta.provider,
       model: first.meta.model,
-      docs
+      docs,
     });
   }
-
   return runs;
 }
 
-export function getResearchRun(runId: string): ResearchRun | null {
-  const runs = getResearchRuns();
+async function readTaskLookupFromDb(): Promise<TaskLookup> {
+  const companyByTicker = new Map<string, string>();
+  const industryByTicker = new Map<string, string>();
+  const pool = getPostgresPool();
+  if (!pool) {
+    return { companyByTicker, industryByTicker };
+  }
+
+  const result = await pool.query<DbTaskRow>(
+    `
+      SELECT ticker, company, extra
+      FROM rb_company_tasks
+    `
+  );
+
+  for (const row of result.rows) {
+    const ticker = (row.ticker || "").trim().toUpperCase();
+    const company = (row.company || "").trim();
+    if (!ticker) continue;
+    if (company) {
+      companyByTicker.set(ticker, company);
+    }
+    const extra = parseExtraObject(row.extra);
+    const industry = (extra.industry || "").trim();
+    if (industry) {
+      industryByTicker.set(ticker, industry);
+    }
+  }
+  return { companyByTicker, industryByTicker };
+}
+
+function parseDbSources(raw: unknown): Array<{ title: string; url: string }> {
+  if (!raw) return [];
+  let payload: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      payload = JSON.parse(raw) as unknown;
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+  const items: Array<{ title: string; url: string }> = [];
+  for (const entry of payload) {
+    if (!entry || typeof entry !== "object") continue;
+    const title = String((entry as { title?: unknown }).title ?? "").trim();
+    const url = String((entry as { url?: unknown }).url ?? "").trim();
+    if (!url) continue;
+    items.push({ title: title || url, url });
+  }
+  return items;
+}
+
+function parseIndustryFromMarkdown(markdown: string): string {
+  if (!markdown) return "";
+  const lines = markdown.split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^- Industry:\s*(.+)$/i);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+  return "";
+}
+
+async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
+  const pool = getPostgresPool();
+  if (!pool) {
+    return [];
+  }
+
+  const [docsResult, taskLookup] = await Promise.all([
+    pool.query<DbDocRow>(
+      `
+        SELECT
+          company,
+          ticker,
+          report_date,
+          prompt_id,
+          question,
+          answer_markdown,
+          sources_json,
+          provider,
+          model,
+          output_path,
+          markdown
+        FROM rb_docs
+        ORDER BY report_date DESC, ticker ASC, prompt_id ASC
+      `
+    ),
+    readTaskLookupFromDb(),
+  ]);
+
+  const byRunId = new Map<string, ResearchRun>();
+  for (const row of docsResult.rows) {
+    const ticker = (row.ticker || "").trim();
+    const reportDate = (row.report_date || "").trim();
+    if (!ticker || !reportDate) {
+      continue;
+    }
+    const tickerKey = ticker.toUpperCase();
+    const runId = toRunId(ticker, reportDate);
+    const markdownIndustry = parseIndustryFromMarkdown(row.markdown || "");
+    const runIndustry =
+      taskLookup.industryByTicker.get(tickerKey) || markdownIndustry || "未分类";
+    const displayCompany = chooseDisplayCompanyName(
+      ticker,
+      (row.company || "").trim() || ticker,
+      taskLookup.companyByTicker.get(tickerKey)
+    );
+
+    let run = byRunId.get(runId);
+    if (!run) {
+      run = {
+        runId,
+        company: displayCompany,
+        ticker,
+        industry: runIndustry,
+        date: reportDate,
+        provider: (row.provider || "").trim() || "Unknown",
+        model: (row.model || "").trim() || "Unknown",
+        docs: [],
+      };
+      byRunId.set(runId, run);
+    }
+
+    const fileName = path.basename((row.output_path || "").trim() || `${row.prompt_id}.md`);
+    const doc: ResearchDoc = {
+      id: (row.prompt_id || "").trim() || "0",
+      question: (row.question || "").trim() || fileName.replace(/\.md$/i, ""),
+      answer: row.answer_markdown || "",
+      sources: parseDbSources(row.sources_json),
+      meta: {
+        company: displayCompany,
+        ticker,
+        date: reportDate,
+        provider: run.provider,
+        model: run.model,
+        industry: run.industry,
+      },
+      fileName,
+    };
+    run.docs.push(doc);
+  }
+
+  const runs = Array.from(byRunId.values());
+  for (const run of runs) {
+    run.docs.sort((a, b) => a.fileName.localeCompare(b.fileName, "zh-CN", { numeric: true }));
+  }
+  runs.sort((a, b) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date, "en");
+    return a.ticker.localeCompare(b.ticker, "en");
+  });
+  return runs;
+}
+
+export async function getResearchRuns(): Promise<ResearchRun[]> {
+  if (hasPostgresDsn()) {
+    try {
+      const pgRuns = await getResearchRunsFromDb();
+      if (pgRuns.length > 0) {
+        return pgRuns;
+      }
+    } catch (error) {
+      console.error("Failed to load research runs from postgres. Falling back to local output.", error);
+    }
+  }
+
+  return getResearchRunsFromLocal();
+}
+
+export async function getResearchRun(runId: string): Promise<ResearchRun | null> {
+  const runs = await getResearchRuns();
   return runs.find((run) => run.runId === runId) ?? null;
 }
