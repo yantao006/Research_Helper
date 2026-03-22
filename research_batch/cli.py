@@ -12,6 +12,22 @@ def parse_args() -> argparse.Namespace:
         description="Batch stock research with multiple LLM providers."
     )
     parser.add_argument("--prompts", default="prompts.csv", help="Path to prompts.csv")
+    parser.add_argument(
+        "--prompt-profile",
+        choices=("auto", "smoke", "production"),
+        default=os.getenv("PROMPT_PROFILE", "auto"),
+        help="Prompt set profile: auto (local=smoke, production=production), smoke, production",
+    )
+    parser.add_argument(
+        "--smoke-prompts",
+        default=os.getenv("SMOKE_PROMPTS_PATH", "prompts.smoke.csv"),
+        help="Path to smoke prompts csv used by --prompt-profile smoke",
+    )
+    parser.add_argument(
+        "--allow-smoke-prompts-in-production",
+        action="store_true",
+        help="Allow smoke prompts in production environment (not recommended)",
+    )
     parser.add_argument("--tasks", default="tasks.csv", help="Path to tasks.csv")
     parser.add_argument(
         "--output-root", default=DEFAULT_OUTPUT_ROOT, help="Directory for markdown outputs"

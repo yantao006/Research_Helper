@@ -67,10 +67,25 @@ def resolve_repo_backend(
     return effective
 
 
+def resolve_prompt_profile(*, requested: str, is_production: bool) -> str:
+    if requested != "auto":
+        return requested
+    return "production" if is_production else "smoke"
+
+
+def resolve_prompts_path(*, project_root: Path, args, effective_profile: str) -> Path:
+    # Keep backward compatibility: explicit --prompts always wins.
+    if args.prompts and args.prompts != "prompts.csv":
+        return project_root / args.prompts
+    if effective_profile == "smoke":
+        return project_root / args.smoke_prompts
+    return project_root / "prompts.csv"
+
+
 def main() -> int:
-    args = parse_args()
     project_root = Path.cwd()
     load_dotenv(project_root / ".env")
+    args = parse_args()
     configure_logging(project_root / args.log_file)
     feishu_dispatcher: FeishuSyncDispatcher | None = None
 
@@ -130,8 +145,26 @@ def main() -> int:
             )
             return 0
 
-        prompts_path = project_root / args.prompts
         tasks_path = project_root / args.tasks
+        prompt_profile = resolve_prompt_profile(
+            requested=args.prompt_profile,
+            is_production=production_env,
+        )
+        if (
+            production_env
+            and prompt_profile == "smoke"
+            and not args.allow_smoke_prompts_in_production
+        ):
+            raise RuntimeError(
+                "Production environment does not allow smoke prompts by default. "
+                "Use --prompt-profile production, or explicitly pass "
+                "--allow-smoke-prompts-in-production if this is intentional."
+            )
+        prompts_path = resolve_prompts_path(
+            project_root=project_root,
+            args=args,
+            effective_profile=prompt_profile,
+        )
         effective_repo_backend = resolve_repo_backend(
             requested=args.repo_backend,
             is_production=production_env,
@@ -185,6 +218,16 @@ def main() -> int:
             "Repository backend resolved requested=%s effective=%s",
             args.repo_backend,
             effective_repo_backend,
+        )
+        if effective_repo_backend == "local" and (args.postgres_dsn or "").strip():
+            logging.warning(
+                "POSTGRES_DSN is set but repository backend is local; this run will NOT write research data to Postgres."
+            )
+        logging.info(
+            "Prompt profile resolved requested=%s effective=%s prompts_path=%s",
+            args.prompt_profile,
+            prompt_profile,
+            prompts_path,
         )
 
         prompts = doc_repo.load_prompts(prompts_path)
@@ -257,7 +300,7 @@ def main() -> int:
 
         updated = False
         for row in tasks_to_process:
-            if is_truthy(row.get("analyzed", "")):
+            if is_truthy(row.get("analyzed", "")) and not args.force_rerun:
                 continue
 
             succeeded = process_company(

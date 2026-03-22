@@ -166,6 +166,12 @@ python3 research_batch/main.py \
 - `--request-timeout`：单次 API 请求超时时间，默认 600 秒
 - `--disable-web-search`：即使 provider 支持联网工具，也强制关闭
 - `--provider-test`：只测试当前 provider 配置是否可用，不处理 `tasks.csv`
+- `--prompt-profile`：Prompt 档位，支持 `auto/smoke/production`
+  - `auto`：本地环境默认 `smoke`，生产环境默认 `production`
+  - `smoke`：使用轻量测试 prompts（默认 `prompts.smoke.csv`）
+  - `production`：使用完整 `prompts.csv`
+- `--smoke-prompts`：自定义 smoke prompts 文件路径（默认 `prompts.smoke.csv`）
+- `--allow-smoke-prompts-in-production`：允许生产环境使用 smoke prompts（默认禁止，防误用）
 - `--force-rerun`：即使结果文件已存在，也强制重新生成并覆盖
 - `--feishu-sync-test`：只测试飞书同步连通性与写入能力，不处理 `tasks.csv`
 - `--feishu-sync-only`：只把本地已有 `output` 结果同步到飞书，不调用模型
@@ -212,6 +218,8 @@ python3 research_batch/main.py --provider qwen --model qwen-max
 python3 research_batch/main.py --provider doubao
 python3 research_batch/main.py --provider openai --disable-web-search
 python3 research_batch/main.py --provider zhipu --provider-test
+python3 research_batch/main.py --provider doubao --prompt-profile smoke --only-ticker 09992.HK
+python3 research_batch/main.py --provider doubao --prompt-profile production --only-ticker 09992.HK
 python3 research_batch/main.py --provider doubao --force-rerun
 python3 research_batch/main.py --feishu-sync-test
 python3 research_batch/main.py --feishu-sync-only --report-date 2026-03-21
