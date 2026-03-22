@@ -562,3 +562,35 @@ export async function getResearchRun(runId: string): Promise<ResearchRun | null>
   const runs = await getResearchRuns();
   return runs.find((run) => run.runId === runId) ?? null;
 }
+
+export async function getLatestRunByTicker(ticker: string): Promise<ResearchRun | null> {
+  const normalized = ticker.trim().toUpperCase();
+  if (!normalized) return null;
+  const runs = await getResearchRuns();
+  const matched = runs.filter((run) => run.ticker.trim().toUpperCase() === normalized);
+  if (matched.length === 0) return null;
+  matched.sort((a, b) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date, "en");
+    return b.runId.localeCompare(a.runId, "en");
+  });
+  return matched[0];
+}
+
+export async function getLatestRunsByTicker(): Promise<ResearchRun[]> {
+  const runs = await getResearchRuns();
+  const latestByTicker = new Map<string, ResearchRun>();
+  for (const run of runs) {
+    const key = run.ticker.trim().toUpperCase();
+    const prev = latestByTicker.get(key);
+    if (!prev) {
+      latestByTicker.set(key, run);
+      continue;
+    }
+    if (run.date > prev.date || (run.date === prev.date && run.runId > prev.runId)) {
+      latestByTicker.set(key, run);
+    }
+  }
+  return Array.from(latestByTicker.values()).sort((a, b) =>
+    a.company.localeCompare(b.company, "zh-CN")
+  );
+}

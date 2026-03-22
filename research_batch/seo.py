@@ -170,5 +170,5 @@ def append_seo_keyword_links(answer: str, keywords: list[str]) -> str:
     lines.extend(["", "## SEO 关键词", ""])
     for keyword in keywords:
         safe_label = keyword.replace("[", "\\[").replace("]", "\\]")
-        lines.append(f"- [{safe_label}](/?kw={quote(keyword)})")
+        lines.append(f"- [{safe_label}](/topic/{quote(keyword)})")
     return "\n".join(lines).strip()

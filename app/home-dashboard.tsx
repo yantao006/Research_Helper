@@ -47,11 +47,6 @@ function toDateValue(value: string): number {
   return Number.isNaN(ts) ? 0 : ts;
 }
 
-function tickerToRunId(ticker: string, reportDate: string): string {
-  const safeTicker = ticker.replace(/[^\w-]+/g, "_").replace(/^_+|_+$/g, "") || "untitled";
-  return `${safeTicker}_${reportDate}`;
-}
-
 function shanghaiDate(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -291,17 +286,12 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
 
   const openResearchedRun = (target: SearchItem | null = selectedItem) => {
     if (!target?.researched) return;
-    if (target.runId) {
-      router.push(`/company/${encodeURIComponent(target.runId)}`);
-      return;
-    }
-    const runId = tickerToRunId(target.ticker, shanghaiDate());
-    router.push(`/company/${encodeURIComponent(runId)}`);
+    router.push(`/stock/${encodeURIComponent(target.ticker.toUpperCase())}`);
   };
 
   const openKeywordResult = (target: KeywordHit | null = selectedKeywordHit) => {
     if (!target) return;
-    router.push(`/company/${encodeURIComponent(target.runId)}?tab=${encodeURIComponent(target.docId)}`);
+    router.push(`/stock/${encodeURIComponent(target.ticker.toUpperCase())}?tab=${encodeURIComponent(target.docId)}`);
   };
 
   const researchedCount = latestRuns.length;
@@ -558,7 +548,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
                 return (
                   <Link
                     key={`discover-${run.runId}`}
-                    href={`/company/${encodeURIComponent(run.runId)}`}
+                    href={`/stock/${encodeURIComponent(run.ticker.toUpperCase())}`}
                     className="home-discover-item"
                   >
                     <div className="home-discover-row">
@@ -617,7 +607,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
             return (
               <Link
                 key={run.runId}
-                href={`/company/${encodeURIComponent(run.runId)}`}
+                href={`/stock/${encodeURIComponent(run.ticker.toUpperCase())}`}
                 className="home-side-row"
               >
                 <div className="home-side-main">
