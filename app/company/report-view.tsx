@@ -6,6 +6,7 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import type { ResearchRun } from "@/lib/research";
 import DocToc from "./[runId]/toc-nav";
+import SectionNav from "./section-nav";
 
 type TocItem = {
   id: string;
@@ -226,14 +227,59 @@ export default function ReportView({
   const seoSection = extractSeoSection(activeDoc.answer || "");
   const highlightResult = highlightMarkdownKeywords(seoSection.body, seoSection.keywords);
   const toc = extractMarkdownToc(seoSection.body || "");
-  const headingSeen = new Map<string, number>();
-  const renderHeading = (level: number, children: React.ReactNode) => {
-    const text = normalizeHeadingText(flattenText(children));
-    const base = slugifyHeading(text);
-    const count = headingSeen.get(base) ?? 0;
-    headingSeen.set(base, count + 1);
-    const id = count === 0 ? base : `${base}-${count + 1}`;
-    return React.createElement(`h${level}`, { id }, children);
+  const sectionNavItems = [
+    {
+      id: "facts",
+      label: "事实",
+      meta: run.factPack?.coverageScore ? `覆盖度 ${run.factPack.coverageScore}` : undefined,
+    },
+    {
+      id: "changes",
+      label: "变化",
+      meta: run.delta?.highlights.length ? `${run.delta.highlights.length} 条` : "暂无",
+    },
+    {
+      id: "insights",
+      label: "观点",
+      meta: run.insightSummary?.relatedDocs.length
+        ? `${run.insightSummary.relatedDocs.length} 篇关联`
+        : undefined,
+    },
+    {
+      id: "full-report",
+      label: "全文",
+      meta: `${run.docs.length} 篇文档`,
+    },
+  ];
+  const renderMarkdownBlock = (markdown: string, headingBaseLevel = 2) => {
+    const headingSeen = new Map<string, number>();
+    const renderHeading = (level: number, children: React.ReactNode) => {
+      const text = normalizeHeadingText(flattenText(children));
+      const base = slugifyHeading(text);
+      const count = headingSeen.get(base) ?? 0;
+      headingSeen.set(base, count + 1);
+      const id = count === 0 ? base : `${base}-${count + 1}`;
+      return React.createElement(`h${Math.min(level, 6)}`, { id }, children);
+    };
+    return (
+      <ReactMarkdown
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema]]}
+        components={{
+          h1: ({ children }) => renderHeading(headingBaseLevel, children),
+          h2: ({ children }) => renderHeading(Math.min(headingBaseLevel + 1, 6), children),
+          h3: ({ children }) => renderHeading(Math.min(headingBaseLevel + 2, 6), children),
+          h4: ({ children }) => renderHeading(Math.min(headingBaseLevel + 3, 6), children),
+          table: ({ children }) => (
+            <div className="table-wrap">
+              <table>{children}</table>
+            </div>
+          ),
+        }}
+      >
+        {markdown || "(无内容)"}
+      </ReactMarkdown>
+    );
   };
 
   return (
@@ -249,13 +295,198 @@ export default function ReportView({
         {run.ticker}
         {run.industry && run.industry !== "未分类" ? ` · ${run.industry}` : ""}
         {" · "}
-        {run.date} · {run.provider} · {run.model}
+        {run.date}
       </p>
 
-      <section className="panel docs-surface">
+      <section className="panel report-hero">
+        <div className="report-hero-grid">
+          <div className="report-hero-main">
+            <div className="report-hero-kicker">Latest Research View</div>
+            <h2 className="report-hero-title">
+              {run.insightSummary?.oneLiner || "围绕当前事实与历史变化，快速抓住这家公司的研究结论。"}
+            </h2>
+            <p className="report-hero-copy">
+              先看已确认事实，再看相对上次的变化，最后进入观点与全文，避免被零散文档打断阅读路径。
+            </p>
+          </div>
+          <div className="report-hero-metrics">
+            <div className="report-hero-metric">
+              <span className="report-hero-metric-label">更新时间</span>
+              <strong>{run.date}</strong>
+            </div>
+            <div className="report-hero-metric">
+              <span className="report-hero-metric-label">行业标签</span>
+              <strong>{run.industry || "未分类"}</strong>
+            </div>
+            <div className="report-hero-metric">
+              <span className="report-hero-metric-label">研究文档</span>
+              <strong>{run.docs.length} 篇</strong>
+            </div>
+            <div className="report-hero-metric">
+              <span className="report-hero-metric-label">变化强度</span>
+              <strong>{run.delta?.highlights.length ? `${run.delta.highlights.length} 条变化` : "首次或暂无"}</strong>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <SectionNav items={sectionNavItems} />
+
+      <section id="facts" className="panel report-layers">
+        <div className="report-layer-grid">
+          <section className="report-layer-card report-layer-card-facts">
+            <div className="report-layer-head">
+              <div>
+                <div className="report-layer-kicker">Facts</div>
+                <h2 className="report-layer-title">事实层</h2>
+              </div>
+              {run.factPack ? (
+                <div className="report-layer-meta">
+                  <span>采集时间 {run.factPack.collectedAt || "-"}</span>
+                  {run.factPack.coverageScore ? <span>覆盖度 {run.factPack.coverageScore}</span> : null}
+                  {run.factPack.confidence ? <span>置信度 {run.factPack.confidence}</span> : null}
+                </div>
+              ) : null}
+            </div>
+            {run.factPack ? (
+              <>
+                <div className="report-fact-groups">
+                  {run.factPack.keyFinancials.length > 0 ? (
+                    <div className="report-fact-group">
+                      <div className="report-fact-label">关键财务</div>
+                      <ul>
+                        {run.factPack.keyFinancials.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {run.factPack.recentCatalysts.length > 0 ? (
+                    <div className="report-fact-group">
+                      <div className="report-fact-label">近期催化</div>
+                      <ul>
+                        {run.factPack.recentCatalysts.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {run.factPack.valuationSnapshot.length > 0 ? (
+                    <div className="report-fact-group">
+                      <div className="report-fact-label">估值快照</div>
+                      <ul>
+                        {run.factPack.valuationSnapshot.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {run.factPack.topRisks.length > 0 ? (
+                    <div className="report-fact-group">
+                      <div className="report-fact-label">核心风险</div>
+                      <ul>
+                        {run.factPack.topRisks.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {run.factPack.trackingItems.length > 0 ? (
+                    <div className="report-fact-group">
+                      <div className="report-fact-label">跟踪清单</div>
+                      <ul>
+                        {run.factPack.trackingItems.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="markdown-body report-layer-markdown">
+                  {renderMarkdownBlock(run.factPack.summaryMarkdown, 3)}
+                </div>
+              </>
+            ) : (
+              <div className="empty">当前未加载到事实包摘要。</div>
+            )}
+          </section>
+
+          <section id="changes" className="report-layer-card report-layer-card-changes">
+            <div className="report-layer-head">
+              <div>
+                <div className="report-layer-kicker">Changes</div>
+                <h2 className="report-layer-title">变化层</h2>
+              </div>
+              {run.delta?.previousReportDate ? (
+                <div className="report-layer-meta">
+                  <span>{run.delta.previousReportDate} → {run.date}</span>
+                </div>
+              ) : null}
+            </div>
+            {run.delta ? (
+              <>
+                {run.delta.highlights.length > 0 ? (
+                  <div className="report-delta-highlights">
+                    {run.delta.highlights.map((item) => (
+                      <div key={item} className="report-delta-item">
+                        {item}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="markdown-body report-layer-markdown">
+                  {renderMarkdownBlock(run.delta.summaryMarkdown, 3)}
+                </div>
+              </>
+            ) : (
+              <div className="empty">当前没有可展示的历史变化摘要。</div>
+            )}
+          </section>
+
+          <section id="insights" className="report-layer-card report-layer-card-insights">
+            <div className="report-layer-head">
+              <div>
+                <div className="report-layer-kicker">Insights</div>
+                <h2 className="report-layer-title">观点层</h2>
+              </div>
+            </div>
+            {run.insightSummary ? (
+              <>
+                {run.insightSummary.oneLiner ? (
+                  <p className="report-one-liner">{run.insightSummary.oneLiner}</p>
+                ) : null}
+                {run.insightSummary.keyPoints.length > 0 ? (
+                  <ul className="report-insight-points">
+                    {run.insightSummary.keyPoints.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {run.insightSummary.relatedDocs.length > 0 ? (
+                  <div className="report-insight-links">
+                    {run.insightSummary.relatedDocs.map((doc) => (
+                      <Link
+                        key={`${doc.id}-${doc.question}`}
+                        className="doc-keyword-chip"
+                        href={`${basePath}?tab=${encodeURIComponent(doc.id)}`}
+                      >
+                        {doc.id}. {doc.question}
+                      </Link>
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="empty">当前没有提炼出观点摘要，将直接展示下方全文。</div>
+            )}
+          </section>
+        </div>
+      </section>
+
+      <section id="full-report" className="panel docs-surface">
         <div className="docs-layout">
           <aside className="docs-left-nav">
-            <div className="docs-nav-title">调研目录</div>
+            <div className="docs-nav-title">全文研究</div>
             <div className="docs-nav-list" role="tablist" aria-label="调研类别">
               {run.docs.map((doc, index) => (
                 <Link
@@ -302,23 +533,7 @@ export default function ReportView({
               </>
             ) : null}
             <div className="markdown-body">
-              <ReactMarkdown
-                remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
-                rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema]]}
-                components={{
-                  h1: ({ children }) => renderHeading(2, children),
-                  h2: ({ children }) => renderHeading(3, children),
-                  h3: ({ children }) => renderHeading(4, children),
-                  h4: ({ children }) => renderHeading(5, children),
-                  table: ({ children }) => (
-                    <div className="table-wrap">
-                      <table>{children}</table>
-                    </div>
-                  ),
-                }}
-              >
-                {highlightResult.highlighted || "(无内容)"}
-              </ReactMarkdown>
+              {renderMarkdownBlock(highlightResult.highlighted || "(无内容)", 2)}
             </div>
             {activeDoc.sources.length > 0 && (
               <div style={{ marginTop: "14px" }}>

@@ -20,6 +20,32 @@ export type ResearchDoc = {
   fileName: string;
 };
 
+export type ResearchFactPack = {
+  collectedAt: string;
+  collectedWithWebSearch: boolean;
+  summaryMarkdown: string;
+  deltaSummaryMarkdown: string;
+  coverageScore: string;
+  confidence: string;
+  keyFinancials: string[];
+  recentCatalysts: string[];
+  valuationSnapshot: string[];
+  topRisks: string[];
+  trackingItems: string[];
+};
+
+export type ResearchDelta = {
+  summaryMarkdown: string;
+  highlights: string[];
+  previousReportDate: string | null;
+};
+
+export type ResearchInsightSummary = {
+  oneLiner: string;
+  keyPoints: string[];
+  relatedDocs: Array<{ id: string; question: string }>;
+};
+
 export type ResearchRun = {
   runId: string;
   company: string;
@@ -29,6 +55,9 @@ export type ResearchRun = {
   provider: string;
   model: string;
   docs: ResearchDoc[];
+  factPack: ResearchFactPack | null;
+  delta: ResearchDelta | null;
+  insightSummary: ResearchInsightSummary | null;
 };
 
 type DbDocRow = {
@@ -49,6 +78,17 @@ type DbTaskRow = {
   ticker: string;
   company: string;
   extra: unknown;
+};
+
+type DbFactPackRow = {
+  company: string;
+  ticker: string;
+  report_date: string;
+  collected_at: string;
+  collected_with_web_search: boolean;
+  payload_json: unknown;
+  summary_markdown: string;
+  delta_summary_markdown: string;
 };
 
 type TaskLookup = {
@@ -154,6 +194,154 @@ function parseExtraObject(raw: unknown): Record<string, string> {
     );
   }
   return {};
+}
+
+function parseJsonObject(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+function toDisplayStrings(raw: unknown, limit = 5): string[] {
+  if (!Array.isArray(raw)) return [];
+  const result: string[] = [];
+  for (const item of raw.slice(0, limit)) {
+    if (typeof item === "string") {
+      const text = item.trim();
+      if (text) result.push(text);
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const parts = [
+      "title",
+      "metric",
+      "name",
+      "period",
+      "value",
+      "timing",
+      "impact",
+      "detail",
+      "note",
+      "risk",
+    ]
+      .map((key) => String(obj[key] ?? "").trim())
+      .filter(Boolean);
+    if (parts.length > 0) {
+      result.push(Array.from(new Set(parts)).join(" / "));
+    }
+  }
+  return result;
+}
+
+function parsePreviousReportDateFromDelta(markdown: string): string | null {
+  const match = markdown.match(/对比区间：\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*->/);
+  return match?.[1] ?? null;
+}
+
+function extractDeltaHighlights(markdown: string): string[] {
+  if (!markdown.trim()) return [];
+  const lines = markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^- /.test(line))
+    .map((line) => line.replace(/^- /, "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(lines)).slice(0, 8);
+}
+
+function buildFactPackViewFromRecord(record: {
+  collectedAt: string;
+  collectedWithWebSearch: boolean;
+  payload: Record<string, unknown>;
+  summaryMarkdown: string;
+  deltaSummaryMarkdown: string;
+}): ResearchFactPack {
+  const quality = parseJsonObject(record.payload.quality);
+  const filings = parseJsonObject(record.payload.filings);
+  const news = parseJsonObject(record.payload.news_and_catalysts);
+  const valuation = parseJsonObject(record.payload.valuation_and_market);
+  const tracking = parseJsonObject(record.payload.tracking);
+  return {
+    collectedAt: record.collectedAt,
+    collectedWithWebSearch: record.collectedWithWebSearch,
+    summaryMarkdown: record.summaryMarkdown,
+    deltaSummaryMarkdown: record.deltaSummaryMarkdown,
+    coverageScore: String(quality.coverage_score ?? "").trim(),
+    confidence: String(quality.confidence ?? "").trim(),
+    keyFinancials: toDisplayStrings(filings.key_financials, 5),
+    recentCatalysts: toDisplayStrings(news.upcoming_catalysts || news.recent_events, 5),
+    valuationSnapshot: toDisplayStrings(valuation.market_data || valuation.valuation_multiples, 5),
+    topRisks: toDisplayStrings(record.payload.risks, 5),
+    trackingItems: toDisplayStrings(tracking.follow_up_items || tracking.minimum_dashboard, 5),
+  };
+}
+
+function readFactPackFromLocal(dirPath: string): ResearchFactPack | null {
+  const factPackPath = path.join(dirPath, "fact_pack.json");
+  if (!fs.existsSync(factPackPath)) {
+    return null;
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(factPackPath, "utf-8")) as Record<string, unknown>;
+    return buildFactPackViewFromRecord({
+      collectedAt: String(raw.collected_at ?? ""),
+      collectedWithWebSearch: Boolean(raw.collected_with_web_search),
+      payload: parseJsonObject(raw.payload),
+      summaryMarkdown: String(raw.summary_markdown ?? ""),
+      deltaSummaryMarkdown: String(raw.delta_summary_markdown ?? ""),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function buildInsightSummary(docs: ResearchDoc[]): ResearchInsightSummary | null {
+  if (docs.length === 0) return null;
+  const priorityKeywords = ["一句话判断", "投资备忘录", "结论", "综合"];
+  const primaryDoc =
+    docs.find((doc) => priorityKeywords.some((keyword) => doc.question.includes(keyword))) || docs[0];
+  const lines = primaryDoc.answer
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const oneLiner =
+    lines.find((line) => !/^[-*#>\d]/.test(line) && line.length >= 12) ||
+    lines.find((line) => line.length >= 8) ||
+    "";
+  const keyPoints = lines
+    .filter((line) => /^[-*] /.test(line) || /^\d+\./.test(line))
+    .map((line) => line.replace(/^[-*]\s+/, "").replace(/^\d+\.\s+/, "").trim())
+    .filter(Boolean)
+    .slice(0, 5);
+  const relatedDocs = docs
+    .filter((doc) =>
+      ["一句话判断", "投资备忘录", "结论", "风险", "催化剂", "估值"].some((keyword) =>
+        doc.question.includes(keyword)
+      )
+    )
+    .slice(0, 5)
+    .map((doc) => ({ id: doc.id, question: doc.question }));
+
+  if (!oneLiner && keyPoints.length === 0 && relatedDocs.length === 0) {
+    return null;
+  }
+  return {
+    oneLiner,
+    keyPoints,
+    relatedDocs,
+  };
 }
 
 function sanitizeRunPart(value: string): string {
@@ -342,6 +530,8 @@ async function getResearchRunsFromLocal(): Promise<ResearchRun[]> {
       taskLookup.companyByTicker.get(ticker)
     );
     const industry = taskLookup.industryByTicker.get(ticker) || first.meta.industry || "未分类";
+    const factPack = readFactPackFromLocal(dirPath);
+    const insightSummary = buildInsightSummary(docs);
     runs.push({
       runId,
       company: displayCompany,
@@ -351,6 +541,15 @@ async function getResearchRunsFromLocal(): Promise<ResearchRun[]> {
       provider: first.meta.provider,
       model: first.meta.model,
       docs,
+      factPack,
+      delta: factPack?.deltaSummaryMarkdown
+        ? {
+            summaryMarkdown: factPack.deltaSummaryMarkdown,
+            highlights: extractDeltaHighlights(factPack.deltaSummaryMarkdown),
+            previousReportDate: parsePreviousReportDateFromDelta(factPack.deltaSummaryMarkdown),
+          }
+        : null,
+      insightSummary,
     });
   }
   return runs;
@@ -429,7 +628,49 @@ async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
     return [];
   }
 
-  const [docsResult, taskLookup] = await Promise.all([
+  const queryFactPacks = async (): Promise<DbFactPackRow[]> => {
+    try {
+      const result = await pool.query<DbFactPackRow>(
+        `
+          SELECT
+            company,
+            ticker,
+            report_date,
+            collected_at,
+            collected_with_web_search,
+            payload_json,
+            summary_markdown,
+            delta_summary_markdown
+          FROM rb_fact_packs
+        `
+      );
+      return result.rows;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("delta_summary_markdown")) {
+        throw error;
+      }
+      const fallback = await pool.query<Omit<DbFactPackRow, "delta_summary_markdown">>(
+        `
+          SELECT
+            company,
+            ticker,
+            report_date,
+            collected_at,
+            collected_with_web_search,
+            payload_json,
+            summary_markdown
+          FROM rb_fact_packs
+        `
+      );
+      return fallback.rows.map((row) => ({
+        ...row,
+        delta_summary_markdown: "",
+      }));
+    }
+  };
+
+  const [docsResult, factRows, taskLookup] = await Promise.all([
     pool.query<DbDocRow>(
       `
         SELECT
@@ -448,8 +689,26 @@ async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
         ORDER BY report_date DESC, ticker ASC, prompt_id ASC
       `
     ),
+    queryFactPacks(),
     readTaskLookupFromDb(),
   ]);
+
+  const factByRunId = new Map<string, ResearchFactPack>();
+  for (const row of factRows) {
+    const ticker = (row.ticker || "").trim();
+    const reportDate = (row.report_date || "").trim();
+    if (!ticker || !reportDate) continue;
+    factByRunId.set(
+      toRunId(ticker, reportDate),
+      buildFactPackViewFromRecord({
+        collectedAt: String(row.collected_at || ""),
+        collectedWithWebSearch: Boolean(row.collected_with_web_search),
+        payload: parseJsonObject(row.payload_json),
+        summaryMarkdown: row.summary_markdown || "",
+        deltaSummaryMarkdown: row.delta_summary_markdown || "",
+      })
+    );
+  }
 
   const byRunId = new Map<string, ResearchRun>();
   for (const row of docsResult.rows) {
@@ -480,6 +739,9 @@ async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
         provider: (row.provider || "").trim() || "Unknown",
         model: (row.model || "").trim() || "Unknown",
         docs: [],
+        factPack: factByRunId.get(runId) || null,
+        delta: null,
+        insightSummary: null,
       };
       byRunId.set(runId, run);
     }
@@ -506,6 +768,14 @@ async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
   const runs = Array.from(byRunId.values());
   for (const run of runs) {
     run.docs.sort((a, b) => a.fileName.localeCompare(b.fileName, "zh-CN", { numeric: true }));
+    run.delta = run.factPack?.deltaSummaryMarkdown
+      ? {
+          summaryMarkdown: run.factPack.deltaSummaryMarkdown,
+          highlights: extractDeltaHighlights(run.factPack.deltaSummaryMarkdown),
+          previousReportDate: parsePreviousReportDateFromDelta(run.factPack.deltaSummaryMarkdown),
+        }
+      : null;
+    run.insightSummary = buildInsightSummary(run.docs);
   }
   runs.sort((a, b) => {
     if (a.date !== b.date) return b.date.localeCompare(a.date, "en");

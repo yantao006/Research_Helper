@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import os
 from datetime import datetime
@@ -31,16 +32,19 @@ from research_batch.feishu import (
 from research_batch.repositories import (
     DualCompanyRepo,
     DualDocRepo,
+    DualFactRepo,
     DualJobRepo,
     DualRunRepo,
     LocalCompanyRepo,
     LocalDocRepo,
+    LocalFactRepo,
     LocalJobRepo,
     LocalRunRepo,
 )
 from research_batch.postgres_repo import (
     PostgresCompanyRepo,
     PostgresDocRepo,
+    PostgresFactRepo,
     PostgresJobRepo,
     PostgresRunRepo,
 )
@@ -101,13 +105,17 @@ def main() -> int:
         )
 
         logging.info(
-            "Using provider=%s api_style=%s model=%s api_base=%s web_search=%s production=%s",
+            "Using provider=%s api_style=%s model=%s api_base=%s web_search=%s web_search_mode=%s fact_pack_enabled=%s production=%s company_workers=%s prompt_workers=%s",
             provider.provider_id,
             provider.api_style,
             model,
             api_base,
             enable_web_search,
+            args.web_search_mode,
+            not args.disable_fact_pack,
             production_env,
+            max(1, args.company_workers),
+            max(1, args.prompt_workers),
         )
         if not provider.supports_web_search and not args.disable_web_search:
             logging.info(
@@ -173,6 +181,7 @@ def main() -> int:
         if effective_repo_backend == "local":
             company_repo = LocalCompanyRepo()
             doc_repo = LocalDocRepo()
+            fact_repo = LocalFactRepo()
             run_repo = LocalRunRepo()
             job_repo = LocalJobRepo()
             logging.info("Repository backend: local")
@@ -184,6 +193,7 @@ def main() -> int:
             dsn = args.postgres_dsn.strip()
             company_repo = PostgresCompanyRepo(dsn=dsn)
             doc_repo = PostgresDocRepo(dsn=dsn)
+            fact_repo = PostgresFactRepo(dsn=dsn)
             run_repo = PostgresRunRepo(dsn=dsn)
             job_repo = PostgresJobRepo(dsn=dsn)
             logging.info("Repository backend: postgres")
@@ -201,6 +211,11 @@ def main() -> int:
             doc_repo = DualDocRepo(
                 primary=LocalDocRepo(),
                 secondary=PostgresDocRepo(dsn=dsn),
+                strict=args.dual_write_strict,
+            )
+            fact_repo = DualFactRepo(
+                primary=LocalFactRepo(),
+                secondary=PostgresFactRepo(dsn=dsn),
                 strict=args.dual_write_strict,
             )
             run_repo = DualRunRepo(
@@ -299,52 +314,114 @@ def main() -> int:
             feishu_dispatcher.start()
 
         updated = False
-        for row in tasks_to_process:
-            if is_truthy(row.get("analyzed", "")) and not args.force_rerun:
-                continue
+        rows_to_process = [
+            row
+            for row in tasks_to_process
+            if not is_truthy(row.get("analyzed", "")) or args.force_rerun
+        ]
+        company_workers = min(max(1, args.company_workers), max(1, len(rows_to_process)))
 
-            succeeded = process_company(
-                row=row,
-                prompts=prompts,
-                api_key=api_key,
-                provider=provider,
-                api_base=api_base,
-                model=model,
-                report_date=args.report_date,
-                output_root=project_root / args.output_root,
-                max_retries=args.max_retries,
-                retry_delay=args.retry_delay,
-                request_timeout=args.request_timeout,
-                enable_web_search=enable_web_search,
-                force_rerun=args.force_rerun,
-                doc_repo=doc_repo,
-                run_repo=run_repo,
-                job_repo=job_repo,
+        def _handle_success(row: dict[str, str]) -> None:
+            nonlocal updated
+            row["analyzed"] = "True"
+            row["analyzed_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            company_repo.save_tasks(
+                tasks_path,
+                fieldnames=fieldnames,
+                rows=tasks,
             )
+            updated = True
+            logging.info(
+                "Marked analyzed company=%s ticker=%s",
+                row["company"].strip(),
+                row["Ticker"].strip(),
+            )
+            if feishu_dispatcher:
+                try:
+                    feishu_dispatcher.enqueue(row=row)
+                except Exception:
+                    logging.exception(
+                        "Feishu async enqueue failed company=%s ticker=%s",
+                        row["company"].strip(),
+                        row["Ticker"].strip(),
+                    )
 
-            if succeeded:
-                row["analyzed"] = "True"
-                row["analyzed_date"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                company_repo.save_tasks(
-                    tasks_path,
-                    fieldnames=fieldnames,
-                    rows=tasks,
+        if company_workers == 1:
+            for row in rows_to_process:
+                succeeded = process_company(
+                    row=row,
+                    prompts=prompts,
+                    api_key=api_key,
+                    provider=provider,
+                    api_base=api_base,
+                    model=model,
+                    report_date=args.report_date,
+                    output_root=project_root / args.output_root,
+                    max_retries=args.max_retries,
+                    retry_delay=args.retry_delay,
+                    request_timeout=args.request_timeout,
+                    enable_web_search=enable_web_search,
+                    web_search_mode=args.web_search_mode,
+                    fact_pack_enabled=not args.disable_fact_pack,
+                    strict_fact_pack=args.strict_fact_pack,
+                    force_rerun=args.force_rerun,
+                    prompt_workers=max(1, args.prompt_workers),
+                    fact_repo=fact_repo,
+                    doc_repo=doc_repo,
+                    run_repo=run_repo,
+                    job_repo=job_repo,
                 )
-                updated = True
-                logging.info(
-                    "Marked analyzed company=%s ticker=%s",
-                    row["company"].strip(),
-                    row["Ticker"].strip(),
-                )
-                if feishu_dispatcher:
+
+                if succeeded:
+                    _handle_success(row)
+        else:
+            logging.info(
+                "Processing companies concurrently companies=%s company_workers=%s",
+                len(rows_to_process),
+                company_workers,
+            )
+            with ThreadPoolExecutor(max_workers=company_workers) as executor:
+                future_map = {
+                    executor.submit(
+                        process_company,
+                        row=row,
+                        prompts=prompts,
+                        api_key=api_key,
+                        provider=provider,
+                        api_base=api_base,
+                        model=model,
+                        report_date=args.report_date,
+                        output_root=project_root / args.output_root,
+                        max_retries=args.max_retries,
+                        retry_delay=args.retry_delay,
+                        request_timeout=args.request_timeout,
+                        enable_web_search=enable_web_search,
+                        web_search_mode=args.web_search_mode,
+                        fact_pack_enabled=not args.disable_fact_pack,
+                        strict_fact_pack=args.strict_fact_pack,
+                        force_rerun=args.force_rerun,
+                        prompt_workers=max(1, args.prompt_workers),
+                        fact_repo=fact_repo,
+                        doc_repo=doc_repo,
+                        run_repo=run_repo,
+                        job_repo=job_repo,
+                    ): row
+                    for row in rows_to_process
+                }
+                for future in as_completed(future_map):
+                    row = future_map[future]
                     try:
-                        feishu_dispatcher.enqueue(row=row)
+                        succeeded = future.result()
                     except Exception:
                         logging.exception(
-                            "Feishu async enqueue failed company=%s ticker=%s",
-                            row["company"].strip(),
-                            row["Ticker"].strip(),
+                            "Company processing crashed company=%s ticker=%s",
+                            row.get("company", "").strip(),
+                            row.get("Ticker", "").strip(),
                         )
+                        continue
+
+                    if succeeded:
+                        _handle_success(row)
 
         if not updated:
             logging.info("No unanalyzed tasks were completed in this run")

@@ -47,6 +47,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=5.0)
     parser.add_argument(
+        "--company-workers",
+        type=int,
+        default=int(os.getenv("COMPANY_WORKERS", "1")),
+        help="Number of companies to process concurrently",
+    )
+    parser.add_argument(
+        "--prompt-workers",
+        type=int,
+        default=int(os.getenv("PROMPT_WORKERS", "1")),
+        help="Number of prompts to process concurrently within the same stage of one company",
+    )
+    parser.add_argument(
         "--request-timeout",
         type=int,
         default=600,
@@ -61,6 +73,22 @@ def parse_args() -> argparse.Namespace:
         "--disable-web-search",
         action="store_true",
         help="Disable web_search even for providers that support it",
+    )
+    parser.add_argument(
+        "--web-search-mode",
+        choices=("all", "selective"),
+        default=os.getenv("WEB_SEARCH_MODE", "selective"),
+        help="Use web search for all prompts or only prompts that explicitly need recent/public-web context",
+    )
+    parser.add_argument(
+        "--disable-fact-pack",
+        action="store_true",
+        help="Disable company fact-pack collection before analysis prompts",
+    )
+    parser.add_argument(
+        "--strict-fact-pack",
+        action="store_true",
+        help="Fail the whole company run if fact-pack collection fails",
     )
     parser.add_argument(
         "--provider-test",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 DEFAULT_OUTPUT_ROOT = "output"
 DEFAULT_LOG_FILE = "logs/research_helper.log"
@@ -35,6 +36,7 @@ class FeishuConfig:
     app_secret: str
     app_token: str
     table_id: str
+    summary_table_id: str = ""
     base_url: str = "https://open.feishu.cn"
 
 
@@ -45,6 +47,21 @@ class SyncDoc:
     answer: str
     sources: list[str]
     output_path: str
+
+
+@dataclass(frozen=True)
+class FactPack:
+    company: str
+    ticker: str
+    report_date: str
+    provider_name: str
+    model: str
+    collected_at: str
+    collected_with_web_search: bool
+    payload: dict[str, Any]
+    summary_markdown: str
+    delta_summary_markdown: str = ""
+    output_path: str = ""
 
 
 REQUIRED_FEISHU_FIELDS = {
@@ -59,6 +76,26 @@ REQUIRED_FEISHU_FIELDS = {
     "provider",
     "model",
     "output_path",
+    "synced_at",
+}
+
+
+REQUIRED_FEISHU_SUMMARY_FIELDS = {
+    "run_key",
+    "company",
+    "ticker",
+    "report_date",
+    "industry",
+    "fact_pack_summary",
+    "delta_summary",
+    "coverage_score",
+    "confidence",
+    "key_financials",
+    "recent_catalysts",
+    "valuation_snapshot",
+    "top_risks",
+    "tracking_items",
+    "output_dir",
     "synced_at",
 }
 
@@ -125,4 +162,3 @@ PROVIDERS: dict[str, ProviderConfig] = {
         supports_include_sources=False,
     ),
 }
-

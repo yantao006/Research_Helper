@@ -69,8 +69,7 @@ def write_output(path: Path, content: str, force_rerun: bool) -> bool:
     return True
 
 
-def parse_saved_markdown_for_sync(path: Path) -> tuple[str, list[str]]:
-    raw = path.read_text(encoding="utf-8")
+def parse_saved_markdown_content(raw: str) -> tuple[str, list[str]]:
     lines = raw.splitlines()
     answer_start = -1
     sources_start = -1
@@ -97,3 +96,7 @@ def parse_saved_markdown_for_sync(path: Path) -> tuple[str, list[str]]:
                 sources.append(f"{match.group(1)} - {match.group(2)}")
     return answer, sources
 
+
+def parse_saved_markdown_for_sync(path: Path) -> tuple[str, list[str]]:
+    raw = path.read_text(encoding="utf-8")
+    return parse_saved_markdown_content(raw)

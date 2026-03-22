@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from research_batch.config import PromptRow
+from research_batch.config import FactPack, PromptRow
 from research_batch.storage import (
     parse_saved_markdown_for_sync,
     read_prompts,
@@ -89,6 +90,9 @@ class DocRepo(Protocol):
     def parse_saved_markdown_for_sync(self, path: Path) -> tuple[str, list[str]]:
         ...
 
+    def load_existing_output_context(self, path: Path) -> tuple[str, list[str]]:
+        ...
+
     def save_research_doc(
         self,
         *,
@@ -116,6 +120,29 @@ class JobRepo(Protocol):
         ...
 
     def finish_company(self, *, job_id: str, success: bool) -> None:
+        ...
+
+
+class FactRepo(Protocol):
+    def build_fact_pack_path(self, *, output_root: Path, ticker: str, report_date: str) -> Path:
+        ...
+
+    def fact_pack_exists(self, path: Path) -> bool:
+        ...
+
+    def load_fact_pack(self, path: Path) -> FactPack | None:
+        ...
+
+    def find_previous_fact_pack(
+        self,
+        *,
+        output_root: Path,
+        ticker: str,
+        report_date: str,
+    ) -> FactPack | None:
+        ...
+
+    def save_fact_pack(self, *, run_id: str, fact_pack: FactPack) -> None:
         ...
 
 
@@ -202,6 +229,9 @@ class LocalDocRepo:
     def parse_saved_markdown_for_sync(self, path: Path) -> tuple[str, list[str]]:
         return parse_saved_markdown_for_sync(path)
 
+    def load_existing_output_context(self, path: Path) -> tuple[str, list[str]]:
+        return parse_saved_markdown_for_sync(path)
+
     def save_research_doc(
         self,
         *,
@@ -234,21 +264,105 @@ class LocalDocRepo:
         )
 
 
+class LocalFactRepo:
+    def build_fact_pack_path(self, *, output_root: Path, ticker: str, report_date: str) -> Path:
+        output_dir = output_root / f"{sanitize_filename(ticker)}_{report_date}"
+        return output_dir / "fact_pack.json"
+
+    def fact_pack_exists(self, path: Path) -> bool:
+        return path.exists()
+
+    def load_fact_pack(self, path: Path) -> FactPack | None:
+        if not path.exists():
+            return None
+        import json
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return FactPack(
+            company=str(payload.get("company") or ""),
+            ticker=str(payload.get("ticker") or ""),
+            report_date=str(payload.get("report_date") or ""),
+            provider_name=str(payload.get("provider_name") or ""),
+            model=str(payload.get("model") or ""),
+            collected_at=str(payload.get("collected_at") or ""),
+            collected_with_web_search=bool(payload.get("collected_with_web_search")),
+            payload=dict(payload.get("payload") or {}),
+            summary_markdown=str(payload.get("summary_markdown") or ""),
+            delta_summary_markdown=str(payload.get("delta_summary_markdown") or ""),
+            output_path=str(payload.get("output_path") or str(path)),
+        )
+
+    def find_previous_fact_pack(
+        self,
+        *,
+        output_root: Path,
+        ticker: str,
+        report_date: str,
+    ) -> FactPack | None:
+        ticker_slug = sanitize_filename(ticker)
+        candidates = sorted(
+            (
+                path
+                for path in output_root.glob(f"{ticker_slug}_*/fact_pack.json")
+                if path.is_file()
+                and path.parent.name.rsplit("_", 1)[-1] != report_date
+            ),
+            key=lambda path: path.parent.name.rsplit("_", 1)[-1],
+            reverse=True,
+        )
+        for path in candidates:
+            fact_pack = self.load_fact_pack(path)
+            if fact_pack:
+                return fact_pack
+        return None
+
+    def save_fact_pack(self, *, run_id: str, fact_pack: FactPack) -> None:
+        _ = run_id
+        import json
+
+        path = Path(fact_pack.output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "company": fact_pack.company,
+                    "ticker": fact_pack.ticker,
+                    "report_date": fact_pack.report_date,
+                    "provider_name": fact_pack.provider_name,
+                    "model": fact_pack.model,
+                    "collected_at": fact_pack.collected_at,
+                    "collected_with_web_search": fact_pack.collected_with_web_search,
+                    "payload": fact_pack.payload,
+                    "summary_markdown": fact_pack.summary_markdown,
+                    "delta_summary_markdown": fact_pack.delta_summary_markdown,
+                    "output_path": fact_pack.output_path,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+
 @dataclass
 class LocalJobRepo:
     events: dict[str, list[str]] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def begin_company(self, *, company: str, ticker: str) -> str:
         job_id = f"{sanitize_filename(ticker)}:{sanitize_filename(company)}"
-        self.events.setdefault(job_id, [])
+        with self._lock:
+            self.events.setdefault(job_id, [])
         return job_id
 
     def add_event(self, *, job_id: str, message: str) -> None:
-        self.events.setdefault(job_id, []).append(message)
+        with self._lock:
+            self.events.setdefault(job_id, []).append(message)
 
     def finish_company(self, *, job_id: str, success: bool) -> None:
         status = "success" if success else "failed"
-        self.events.setdefault(job_id, []).append(f"finished:{status}")
+        with self._lock:
+            self.events.setdefault(job_id, []).append(f"finished:{status}")
 
 
 def _on_secondary_error(*, op: str, strict: bool, exc: Exception) -> None:
@@ -315,6 +429,7 @@ class DualRunRepo:
     secondary: RunRepo
     strict: bool = False
     _run_id_map: dict[str, str] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def build_output_dir(self, *, output_root: Path, ticker: str, report_date: str) -> Path:
         return self.primary.build_output_dir(
@@ -392,7 +507,8 @@ class DualRunRepo:
                 provider_name=provider_name,
                 model=model,
             )
-            self._run_id_map[primary_run_id] = secondary_run_id
+            with self._lock:
+                self._run_id_map[primary_run_id] = secondary_run_id
         except Exception as exc:
             _on_secondary_error(op="run.begin_run", strict=self.strict, exc=exc)
         return primary_run_id
@@ -405,7 +521,8 @@ class DualRunRepo:
         error_message: str = "",
     ) -> None:
         self.primary.finish_run(run_id=run_id, success=success, error_message=error_message)
-        secondary_run_id = self._run_id_map.get(run_id, run_id)
+        with self._lock:
+            secondary_run_id = self._run_id_map.get(run_id, run_id)
         try:
             self.secondary.finish_run(
                 run_id=secondary_run_id,
@@ -453,6 +570,9 @@ class DualDocRepo:
 
     def parse_saved_markdown_for_sync(self, path: Path) -> tuple[str, list[str]]:
         return self.primary.parse_saved_markdown_for_sync(path)
+
+    def load_existing_output_context(self, path: Path) -> tuple[str, list[str]]:
+        return self.primary.load_existing_output_context(path)
 
     def save_research_doc(
         self,
@@ -509,19 +629,22 @@ class DualJobRepo:
     secondary: JobRepo
     strict: bool = False
     _job_id_map: dict[str, str] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def begin_company(self, *, company: str, ticker: str) -> str:
         primary_job_id = self.primary.begin_company(company=company, ticker=ticker)
         try:
             secondary_job_id = self.secondary.begin_company(company=company, ticker=ticker)
-            self._job_id_map[primary_job_id] = secondary_job_id
+            with self._lock:
+                self._job_id_map[primary_job_id] = secondary_job_id
         except Exception as exc:
             _on_secondary_error(op="job.begin_company", strict=self.strict, exc=exc)
         return primary_job_id
 
     def add_event(self, *, job_id: str, message: str) -> None:
         self.primary.add_event(job_id=job_id, message=message)
-        secondary_job_id = self._job_id_map.get(job_id, job_id)
+        with self._lock:
+            secondary_job_id = self._job_id_map.get(job_id, job_id)
         try:
             self.secondary.add_event(job_id=secondary_job_id, message=message)
         except Exception as exc:
@@ -529,8 +652,92 @@ class DualJobRepo:
 
     def finish_company(self, *, job_id: str, success: bool) -> None:
         self.primary.finish_company(job_id=job_id, success=success)
-        secondary_job_id = self._job_id_map.get(job_id, job_id)
+        with self._lock:
+            secondary_job_id = self._job_id_map.get(job_id, job_id)
         try:
             self.secondary.finish_company(job_id=secondary_job_id, success=success)
         except Exception as exc:
             _on_secondary_error(op="job.finish_company", strict=self.strict, exc=exc)
+
+
+@dataclass
+class DualFactRepo:
+    primary: FactRepo
+    secondary: FactRepo
+    strict: bool = False
+
+    def build_fact_pack_path(self, *, output_root: Path, ticker: str, report_date: str) -> Path:
+        return self.primary.build_fact_pack_path(
+            output_root=output_root,
+            ticker=ticker,
+            report_date=report_date,
+        )
+
+    def fact_pack_exists(self, path: Path) -> bool:
+        primary_exists = self.primary.fact_pack_exists(path)
+        try:
+            secondary_exists = self.secondary.fact_pack_exists(path)
+            if primary_exists != secondary_exists:
+                logging.warning(
+                    "Dual consistency check(fact_pack_exists) mismatch path=%s primary=%s secondary=%s",
+                    path,
+                    primary_exists,
+                    secondary_exists,
+                )
+        except Exception as exc:
+            _on_secondary_error(op="fact.fact_pack_exists", strict=self.strict, exc=exc)
+        return primary_exists
+
+    def load_fact_pack(self, path: Path) -> FactPack | None:
+        fact_pack = self.primary.load_fact_pack(path)
+        try:
+            secondary_fact_pack = self.secondary.load_fact_pack(path)
+            if bool(fact_pack) != bool(secondary_fact_pack):
+                logging.warning(
+                    "Dual consistency check(fact.load_fact_pack) mismatch path=%s primary=%s secondary=%s",
+                    path,
+                    bool(fact_pack),
+                    bool(secondary_fact_pack),
+                )
+        except Exception as exc:
+            _on_secondary_error(op="fact.load_fact_pack", strict=self.strict, exc=exc)
+            secondary_fact_pack = None
+        return fact_pack or secondary_fact_pack
+
+    def find_previous_fact_pack(
+        self,
+        *,
+        output_root: Path,
+        ticker: str,
+        report_date: str,
+    ) -> FactPack | None:
+        fact_pack = self.primary.find_previous_fact_pack(
+            output_root=output_root,
+            ticker=ticker,
+            report_date=report_date,
+        )
+        try:
+            secondary_fact_pack = self.secondary.find_previous_fact_pack(
+                output_root=output_root,
+                ticker=ticker,
+                report_date=report_date,
+            )
+            if bool(fact_pack) != bool(secondary_fact_pack):
+                logging.warning(
+                    "Dual consistency check(fact.find_previous_fact_pack) mismatch ticker=%s report_date=%s primary=%s secondary=%s",
+                    ticker,
+                    report_date,
+                    bool(fact_pack),
+                    bool(secondary_fact_pack),
+                )
+        except Exception as exc:
+            _on_secondary_error(op="fact.find_previous_fact_pack", strict=self.strict, exc=exc)
+            secondary_fact_pack = None
+        return fact_pack or secondary_fact_pack
+
+    def save_fact_pack(self, *, run_id: str, fact_pack: FactPack) -> None:
+        self.primary.save_fact_pack(run_id=run_id, fact_pack=fact_pack)
+        try:
+            self.secondary.save_fact_pack(run_id=run_id, fact_pack=fact_pack)
+        except Exception as exc:
+            _on_secondary_error(op="fact.save_fact_pack", strict=self.strict, exc=exc)

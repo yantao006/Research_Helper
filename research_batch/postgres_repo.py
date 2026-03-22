@@ -7,9 +7,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from research_batch.config import PromptRow
+from research_batch.config import FactPack, PromptRow
 from research_batch.env_utils import is_truthy
 from research_batch.storage import (
+    parse_saved_markdown_content,
     parse_saved_markdown_for_sync,
     read_prompts,
     read_tasks,
@@ -107,6 +108,33 @@ def _ensure_schema(dsn: str) -> None:
             )
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS rb_fact_packs (
+                    fact_key TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    company TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    report_date TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    collected_at TEXT NOT NULL,
+                    collected_with_web_search BOOLEAN NOT NULL DEFAULT FALSE,
+                    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    summary_markdown TEXT NOT NULL DEFAULT '',
+                    delta_summary_markdown TEXT NOT NULL DEFAULT '',
+                    output_path TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE rb_fact_packs
+                ADD COLUMN IF NOT EXISTS delta_summary_markdown TEXT NOT NULL DEFAULT '';
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS rb_seo_keywords (
                     id BIGSERIAL PRIMARY KEY,
                     sync_key TEXT NOT NULL,
@@ -141,6 +169,9 @@ def _ensure_schema(dsn: str) -> None:
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_rb_docs_ticker_date ON rb_docs (ticker, report_date);"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rb_fact_packs_ticker_date ON rb_fact_packs (ticker, report_date);"
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_rb_docs_answer_search ON rb_docs USING GIN (to_tsvector('simple', coalesce(answer_markdown, '')));"
@@ -473,6 +504,20 @@ class PostgresDocRepo(_PostgresBase):
     def parse_saved_markdown_for_sync(self, path: Path) -> tuple[str, list[str]]:
         return parse_saved_markdown_for_sync(path)
 
+    def load_existing_output_context(self, path: Path) -> tuple[str, list[str]]:
+        if path.exists():
+            return parse_saved_markdown_for_sync(path)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT markdown FROM rb_outputs WHERE output_path = %s LIMIT 1",
+                    (str(path),),
+                )
+                row = cur.fetchone()
+        if not row or not row[0]:
+            return "", []
+        return parse_saved_markdown_content(str(row[0]))
+
     def save_research_doc(
         self,
         *,
@@ -554,6 +599,205 @@ class PostgresDocRepo(_PostgresBase):
                         """,
                         (sync_key, keyword, keyword.casefold()),
                     )
+            conn.commit()
+
+
+class PostgresFactRepo(_PostgresBase):
+    def build_fact_pack_path(self, *, output_root: Path, ticker: str, report_date: str) -> Path:
+        return output_root / f"{sanitize_filename(ticker)}_{report_date}" / "fact_pack.json"
+
+    def fact_pack_exists(self, path: Path) -> bool:
+        if path.exists():
+            return True
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM rb_fact_packs WHERE output_path = %s LIMIT 1",
+                    (str(path),),
+                )
+                return cur.fetchone() is not None
+
+    def load_fact_pack(self, path: Path) -> FactPack | None:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return FactPack(
+                company=str(payload.get("company") or ""),
+                ticker=str(payload.get("ticker") or ""),
+                report_date=str(payload.get("report_date") or ""),
+                provider_name=str(payload.get("provider_name") or ""),
+                model=str(payload.get("model") or ""),
+                collected_at=str(payload.get("collected_at") or ""),
+                collected_with_web_search=bool(payload.get("collected_with_web_search")),
+                payload=dict(payload.get("payload") or {}),
+                summary_markdown=str(payload.get("summary_markdown") or ""),
+                delta_summary_markdown=str(payload.get("delta_summary_markdown") or ""),
+                output_path=str(payload.get("output_path") or str(path)),
+            )
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        company,
+                        ticker,
+                        report_date,
+                        provider,
+                        model,
+                        collected_at,
+                        collected_with_web_search,
+                        payload_json,
+                        summary_markdown,
+                        delta_summary_markdown,
+                        output_path
+                    FROM rb_fact_packs
+                    WHERE output_path = %s
+                    LIMIT 1
+                    """,
+                    (str(path),),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return FactPack(
+            company=str(row[0] or ""),
+            ticker=str(row[1] or ""),
+            report_date=str(row[2] or ""),
+            provider_name=str(row[3] or ""),
+            model=str(row[4] or ""),
+            collected_at=str(row[5] or ""),
+            collected_with_web_search=bool(row[6]),
+            payload=dict(row[7] or {}),
+            summary_markdown=str(row[8] or ""),
+            delta_summary_markdown=str(row[9] or ""),
+            output_path=str(row[10] or str(path)),
+        )
+
+    def find_previous_fact_pack(
+        self,
+        *,
+        output_root: Path,
+        ticker: str,
+        report_date: str,
+    ) -> FactPack | None:
+        _ = output_root
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        company,
+                        ticker,
+                        report_date,
+                        provider,
+                        model,
+                        collected_at,
+                        collected_with_web_search,
+                        payload_json,
+                        summary_markdown,
+                        delta_summary_markdown,
+                        output_path
+                    FROM rb_fact_packs
+                    WHERE ticker = %s
+                      AND report_date < %s
+                    ORDER BY report_date DESC
+                    LIMIT 1
+                    """,
+                    (ticker, report_date),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return FactPack(
+            company=str(row[0] or ""),
+            ticker=str(row[1] or ""),
+            report_date=str(row[2] or ""),
+            provider_name=str(row[3] or ""),
+            model=str(row[4] or ""),
+            collected_at=str(row[5] or ""),
+            collected_with_web_search=bool(row[6]),
+            payload=dict(row[7] or {}),
+            summary_markdown=str(row[8] or ""),
+            delta_summary_markdown=str(row[9] or ""),
+            output_path=str(row[10] or ""),
+        )
+
+    def save_fact_pack(self, *, run_id: str, fact_pack: FactPack) -> None:
+        path = Path(fact_pack.output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "company": fact_pack.company,
+                    "ticker": fact_pack.ticker,
+                    "report_date": fact_pack.report_date,
+                    "provider_name": fact_pack.provider_name,
+                    "model": fact_pack.model,
+                    "collected_at": fact_pack.collected_at,
+                    "collected_with_web_search": fact_pack.collected_with_web_search,
+                    "payload": fact_pack.payload,
+                    "summary_markdown": fact_pack.summary_markdown,
+                    "delta_summary_markdown": fact_pack.delta_summary_markdown,
+                    "output_path": fact_pack.output_path,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        fact_key = f"{fact_pack.ticker}|{fact_pack.report_date}"
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO rb_fact_packs
+                        (
+                            fact_key,
+                            run_id,
+                            company,
+                            ticker,
+                            report_date,
+                            provider,
+                            model,
+                            collected_at,
+                            collected_with_web_search,
+                            payload_json,
+                            summary_markdown,
+                            delta_summary_markdown,
+                            output_path,
+                            updated_at
+                        )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, NOW()
+                    )
+                    ON CONFLICT (fact_key) DO UPDATE SET
+                        run_id = EXCLUDED.run_id,
+                        company = EXCLUDED.company,
+                        provider = EXCLUDED.provider,
+                        model = EXCLUDED.model,
+                        collected_at = EXCLUDED.collected_at,
+                        collected_with_web_search = EXCLUDED.collected_with_web_search,
+                        payload_json = EXCLUDED.payload_json,
+                        summary_markdown = EXCLUDED.summary_markdown,
+                        delta_summary_markdown = EXCLUDED.delta_summary_markdown,
+                        output_path = EXCLUDED.output_path,
+                        updated_at = NOW()
+                    """,
+                    (
+                        fact_key,
+                        run_id,
+                        fact_pack.company,
+                        fact_pack.ticker,
+                        fact_pack.report_date,
+                        fact_pack.provider_name,
+                        fact_pack.model,
+                        fact_pack.collected_at,
+                        fact_pack.collected_with_web_search,
+                        json.dumps(fact_pack.payload, ensure_ascii=False),
+                        fact_pack.summary_markdown,
+                        fact_pack.delta_summary_markdown,
+                        fact_pack.output_path,
+                    ),
+                )
             conn.commit()
 
 

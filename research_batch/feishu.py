@@ -14,7 +14,13 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from research_batch.config import REQUIRED_FEISHU_FIELDS, FeishuConfig, PromptRow, SyncDoc
+from research_batch.config import (
+    REQUIRED_FEISHU_FIELDS,
+    REQUIRED_FEISHU_SUMMARY_FIELDS,
+    FeishuConfig,
+    PromptRow,
+    SyncDoc,
+)
 from research_batch.env_utils import is_falsy, require_env
 from research_batch.repositories import DocRepo, RunRepo
 
@@ -33,6 +39,7 @@ def resolve_feishu_config() -> FeishuConfig | None:
         app_secret=require_env("FEISHU_APP_SECRET"),
         app_token=require_env("FEISHU_APP_TOKEN"),
         table_id=require_env("FEISHU_TABLE_ID"),
+        summary_table_id=os.getenv("FEISHU_SUMMARY_TABLE_ID", "").strip(),
     )
 
 
@@ -87,16 +94,18 @@ def list_feishu_field_names(
     config: FeishuConfig,
     tenant_access_token: str,
     timeout: int,
+    table_id: str | None = None,
 ) -> set[str]:
     headers = {"Authorization": f"Bearer {tenant_access_token}"}
     page_token = ""
     names: set[str] = set()
+    resolved_table_id = (table_id or config.table_id).strip()
     while True:
         query = {"page_size": "500"}
         if page_token:
             query["page_token"] = page_token
         url = (
-            f"{config.base_url}/open-apis/bitable/v1/apps/{config.app_token}/tables/{config.table_id}/fields?"
+            f"{config.base_url}/open-apis/bitable/v1/apps/{config.app_token}/tables/{resolved_table_id}/fields?"
             + urllib.parse.urlencode(query)
         )
         payload = feishu_request(method="GET", url=url, headers=headers, timeout=timeout)
@@ -118,13 +127,17 @@ def ensure_feishu_required_fields(
     config: FeishuConfig,
     tenant_access_token: str,
     timeout: int,
+    table_id: str | None = None,
+    required_fields: set[str] | None = None,
 ) -> None:
     existing = list_feishu_field_names(
         config=config,
         tenant_access_token=tenant_access_token,
         timeout=timeout,
+        table_id=table_id,
     )
-    missing = sorted(REQUIRED_FEISHU_FIELDS - existing)
+    resolved_required = required_fields or REQUIRED_FEISHU_FIELDS
+    missing = sorted(resolved_required - existing)
     if missing:
         raise RuntimeError(
             "Feishu table is missing required fields: "
@@ -138,16 +151,18 @@ def list_all_feishu_records(
     config: FeishuConfig,
     tenant_access_token: str,
     timeout: int,
+    table_id: str | None = None,
 ) -> list[dict[str, Any]]:
     headers = {"Authorization": f"Bearer {tenant_access_token}"}
     page_token = ""
     records: list[dict[str, Any]] = []
+    resolved_table_id = (table_id or config.table_id).strip()
     while True:
         query = {"page_size": "500"}
         if page_token:
             query["page_token"] = page_token
         url = (
-            f"{config.base_url}/open-apis/bitable/v1/apps/{config.app_token}/tables/{config.table_id}/records?"
+            f"{config.base_url}/open-apis/bitable/v1/apps/{config.app_token}/tables/{resolved_table_id}/records?"
             + urllib.parse.urlencode(query)
         )
         payload = feishu_request(method="GET", url=url, headers=headers, timeout=timeout)
@@ -159,6 +174,180 @@ def list_all_feishu_records(
         if not page_token:
             break
     return records
+
+
+def _normalize_fact_list(value: Any, *, limit: int = 5) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value[:limit]:
+        if isinstance(item, dict):
+            parts: list[str] = []
+            for key in ("title", "metric", "name", "period", "value", "timing", "impact", "detail", "note"):
+                text = str(item.get(key) or "").strip()
+                if text:
+                    parts.append(text)
+            normalized = " / ".join(dict.fromkeys(parts))
+        else:
+            normalized = str(item or "").strip()
+        if normalized:
+            result.append(normalized)
+    return result
+
+
+def _build_fact_pack_summary_fields(
+    *,
+    row: dict[str, str],
+    report_date: str,
+    output_dir: Path,
+) -> dict[str, str] | None:
+    fact_pack_path = output_dir / "fact_pack.json"
+    if not fact_pack_path.exists():
+        return None
+    payload = json.loads(fact_pack_path.read_text(encoding="utf-8"))
+    fact_payload = payload.get("payload") or {}
+    if not isinstance(fact_payload, dict):
+        fact_payload = {}
+    quality = fact_payload.get("quality") or {}
+    filings = fact_payload.get("filings") or {}
+    news = fact_payload.get("news_and_catalysts") or {}
+    valuation = fact_payload.get("valuation_and_market") or {}
+    tracking = fact_payload.get("tracking") or {}
+    risks = fact_payload.get("risks") or []
+    company = row["company"].strip()
+    ticker = row["Ticker"].strip()
+    industry = str(row.get("industry") or "").strip()
+    if not industry:
+        profile = fact_payload.get("profile") or {}
+        if isinstance(profile, dict):
+            industry = str(profile.get("industry") or "").strip()
+
+    coverage_score = ""
+    confidence = ""
+    if isinstance(quality, dict):
+        coverage_score = str(quality.get("coverage_score") or "").strip()
+        confidence = str(quality.get("confidence") or "").strip()
+
+    key_financials = _normalize_fact_list(
+        filings.get("key_financials") if isinstance(filings, dict) else None,
+        limit=5,
+    )
+    recent_catalysts = _normalize_fact_list(
+        (news.get("recent_events") if isinstance(news, dict) else None)
+        or (news.get("upcoming_catalysts") if isinstance(news, dict) else None),
+        limit=5,
+    )
+    valuation_snapshot = _normalize_fact_list(
+        (valuation.get("market_data") if isinstance(valuation, dict) else None)
+        or (valuation.get("valuation_multiples") if isinstance(valuation, dict) else None),
+        limit=5,
+    )
+    top_risks = _normalize_fact_list(risks, limit=5)
+    tracking_items = _normalize_fact_list(
+        (tracking.get("follow_up_items") if isinstance(tracking, dict) else None)
+        or (tracking.get("minimum_dashboard") if isinstance(tracking, dict) else None),
+        limit=5,
+    )
+
+    return {
+        "run_key": f"{ticker}|{report_date}",
+        "company": company,
+        "ticker": ticker,
+        "report_date": report_date,
+        "industry": industry,
+        "fact_pack_summary": str(payload.get("summary_markdown") or "").strip(),
+        "delta_summary": str(payload.get("delta_summary_markdown") or "").strip(),
+        "coverage_score": coverage_score,
+        "confidence": confidence,
+        "key_financials": "\n".join(key_financials),
+        "recent_catalysts": "\n".join(recent_catalysts),
+        "valuation_snapshot": "\n".join(valuation_snapshot),
+        "top_risks": "\n".join(top_risks),
+        "tracking_items": "\n".join(tracking_items),
+        "output_dir": str(output_dir),
+        "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def sync_company_summary_to_feishu(
+    *,
+    config: FeishuConfig,
+    tenant_access_token: str,
+    row: dict[str, str],
+    report_date: str,
+    output_dir: Path,
+    request_timeout: int,
+) -> None:
+    table_id = config.summary_table_id.strip()
+    if not table_id:
+        return
+    fields = _build_fact_pack_summary_fields(
+        row=row,
+        report_date=report_date,
+        output_dir=output_dir,
+    )
+    if not fields:
+        logging.info(
+            "Feishu summary sync skipped: fact_pack.json not found for %s %s",
+            row["company"].strip(),
+            row["Ticker"].strip(),
+        )
+        return
+
+    headers = {"Authorization": f"Bearer {tenant_access_token}"}
+    ensure_feishu_required_fields(
+        config=config,
+        tenant_access_token=tenant_access_token,
+        timeout=request_timeout,
+        table_id=table_id,
+        required_fields=REQUIRED_FEISHU_SUMMARY_FIELDS,
+    )
+    existing_records = list_all_feishu_records(
+        config=config,
+        tenant_access_token=tenant_access_token,
+        timeout=request_timeout,
+        table_id=table_id,
+    )
+    existing_by_key: dict[str, str] = {}
+    for item in existing_records:
+        item_fields = item.get("fields") or {}
+        run_key = str(item_fields.get("run_key") or "").strip()
+        record_id = str(item.get("record_id") or "").strip()
+        if run_key and record_id:
+            existing_by_key[run_key] = record_id
+
+    run_key = fields["run_key"]
+    record_id = existing_by_key.get(run_key)
+    if record_id:
+        url = (
+            f"{config.base_url}/open-apis/bitable/v1/apps/{config.app_token}/tables/"
+            f"{table_id}/records/{record_id}"
+        )
+        feishu_request(
+            method="PUT",
+            url=url,
+            headers=headers,
+            body={"fields": fields},
+            timeout=request_timeout,
+        )
+        logging.info("Feishu updated summary record run_key=%s", run_key)
+        return
+
+    url = (
+        f"{config.base_url}/open-apis/bitable/v1/apps/{config.app_token}/tables/"
+        f"{table_id}/records"
+    )
+    payload = feishu_request(
+        method="POST",
+        url=url,
+        headers=headers,
+        body={"fields": fields},
+        timeout=request_timeout,
+    )
+    created_id = str(((payload.get("data") or {}).get("record") or {}).get("record_id") or "")
+    if created_id:
+        existing_by_key[run_key] = created_id
+    logging.info("Feishu created summary record run_key=%s", run_key)
 
 
 def sync_company_results_to_feishu(
@@ -276,6 +465,15 @@ def sync_company_results_to_feishu(
             if created_id:
                 existing_by_key[sync_key] = created_id
             logging.info("Feishu created record sync_key=%s", sync_key)
+
+    sync_company_summary_to_feishu(
+        config=config,
+        tenant_access_token=tenant_access_token,
+        row=row,
+        report_date=report_date,
+        output_dir=output_dir,
+        request_timeout=request_timeout,
+    )
 
 
 class FeishuSyncDispatcher:
