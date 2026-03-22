@@ -1,8 +1,16 @@
+import type { Metadata } from "next";
 import { getResearchRuns } from "@/lib/research";
 import { isResearchJobsEnabled } from "@/lib/server/runtime-flags";
 import HomeDashboard from "./home-dashboard";
 
 export const dynamic = "force-dynamic";
+export const metadata: Metadata = {
+  title: "上市公司调研结果与搜索",
+  description: "快速检索公司代码或名称，查看已生成的上市公司调研结论与历史研究内容。",
+  alternates: {
+    canonical: "/",
+  },
+};
 
 type HomePageProps = {
   searchParams: Promise<{ q?: string; kw?: string }>;

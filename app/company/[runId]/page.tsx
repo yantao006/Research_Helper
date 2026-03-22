@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getResearchRun } from "@/lib/research";
@@ -13,6 +14,10 @@ export const dynamic = "force-dynamic";
 type PageProps = {
   params: Promise<{ runId: string }>;
   searchParams: Promise<{ tab?: string }>;
+};
+
+type MetadataProps = {
+  params: Promise<{ runId: string }>;
 };
 
 type TocItem = {
@@ -209,6 +214,66 @@ function extractMarkdownToc(markdown: string): TocItem[] {
     toc.push({ id, text: headingText, level });
   }
   return toc;
+}
+
+function buildMetaDescription(run: Awaited<ReturnType<typeof getResearchRun>>): string {
+  if (!run) {
+    return "公司调研结果未找到。";
+  }
+  const firstDoc = run.docs[0];
+  const answerPreview = (firstDoc?.answer || "")
+    .replace(/[#>*_`~\-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  const prefix = `${run.company}（${run.ticker}）调研结论与核心要点。`;
+  if (!answerPreview) {
+    return `${prefix} 含商业模式、财务质量、风险与估值分析。`;
+  }
+  return `${prefix} ${answerPreview}`;
+}
+
+export async function generateMetadata({ params }: MetadataProps): Promise<Metadata> {
+  const { runId } = await params;
+  const decodedRunId = decodeURIComponent(runId);
+  const run = await getResearchRun(decodedRunId);
+  const canonicalPath = `/company/${encodeURIComponent(decodedRunId)}`;
+
+  if (!run) {
+    return {
+      title: "公司调研结果未找到",
+      description: "该公司调研结果不存在或已被移除。",
+      alternates: {
+        canonical: canonicalPath,
+      },
+      robots: {
+        index: false,
+        follow: true,
+      },
+    };
+  }
+
+  const title = `${run.company}（${run.ticker}）调研报告`;
+  const description = buildMetaDescription(run);
+  return {
+    title,
+    description,
+    alternates: {
+      canonical: canonicalPath,
+    },
+    openGraph: {
+      type: "article",
+      title,
+      description,
+      url: canonicalPath,
+      locale: "zh_CN",
+    },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+    },
+  };
 }
 
 export default async function CompanyPage({ params, searchParams }: PageProps) {
