@@ -9,6 +9,7 @@
     "release:check": "python3 -m py_compile research_batch/*.py && next build && npm audit --omit=dev"
   },
   "dependencies": {
+    "@vercel/analytics": "^2.0.1",
     "next": "^15.5.14",
     "pg": "^8.20.0",
     "react": "19.0.0",
