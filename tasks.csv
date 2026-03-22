@@ -1,3 +1,6 @@
 company,Ticker,analyzed,analyzed_date
-Meta Platforms Inc-A,META,True,2026-03-21 16:12:54
-泡泡玛特,09992.HK,True,2026-03-22 10:41:36
+UnitedHealth Group,UNH,False,
+Tesla,TSLA,False,
+Link REIT,00823.HK,False,
+POP MART,09992.HK,False,
+Changjiang Electric Power,600900.SH,False,
