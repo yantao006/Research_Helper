@@ -1,10 +1,16 @@
 import type { Metadata } from "next";
+import { unstable_cache } from "next/cache";
 import { notFound } from "next/navigation";
 import { getLatestRunByTicker } from "@/lib/research";
 import { getSiteUrl } from "@/lib/server/site-url";
 import ReportView from "@/app/company/report-view";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 1800;
+const getCachedLatestRunByTicker = unstable_cache(
+  async (ticker: string) => getLatestRunByTicker(ticker),
+  ["latest-run-by-ticker"],
+  { revalidate }
+);
 
 type PageProps = {
   params: Promise<{ ticker: string }>;
@@ -55,7 +61,7 @@ function toArticleJsonLd(
 export async function generateMetadata({ params }: MetadataProps): Promise<Metadata> {
   const { ticker } = await params;
   const normalizedTicker = normalizeTicker(ticker);
-  const run = await getLatestRunByTicker(normalizedTicker);
+  const run = await getCachedLatestRunByTicker(normalizedTicker);
   const canonicalPath = `/stock/${encodeURIComponent(normalizedTicker)}`;
 
   if (!run) {
@@ -70,6 +76,7 @@ export async function generateMetadata({ params }: MetadataProps): Promise<Metad
   const preview = (run.docs[0]?.answer || "").replace(/\s+/g, " ").trim();
   const title = `${run.company}（${run.ticker}）最新调研报告`;
   const description = buildMetaDescription(run.company, run.ticker, preview);
+  const ogImage = "/og-cover.jpg";
   return {
     title,
     description,
@@ -80,11 +87,13 @@ export async function generateMetadata({ params }: MetadataProps): Promise<Metad
       description,
       url: canonicalPath,
       locale: "zh_CN",
+      images: [ogImage],
     },
     twitter: {
       card: "summary_large_image",
       title,
       description,
+      images: [ogImage],
     },
     robots: { index: true, follow: true },
   };
@@ -94,7 +103,7 @@ export default async function StockPage({ params, searchParams }: PageProps) {
   const { ticker } = await params;
   const query = await searchParams;
   const normalizedTicker = normalizeTicker(ticker);
-  const run = await getLatestRunByTicker(normalizedTicker);
+  const run = await getCachedLatestRunByTicker(normalizedTicker);
   if (!run) notFound();
 
   const siteUrl = getSiteUrl();
@@ -114,4 +123,3 @@ export default async function StockPage({ params, searchParams }: PageProps) {
     </>
   );
 }
-

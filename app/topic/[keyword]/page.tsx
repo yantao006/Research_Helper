@@ -1,10 +1,16 @@
 import type { Metadata } from "next";
+import { unstable_cache } from "next/cache";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { searchKeywordHits } from "@/lib/server/keyword-search";
 import { getSiteUrl } from "@/lib/server/site-url";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 1800;
+const getCachedKeywordHits = unstable_cache(
+  async (keyword: string, limit: number) => searchKeywordHits(keyword, limit),
+  ["keyword-hits-by-term"],
+  { revalidate }
+);
 
 type PageProps = {
   params: Promise<{ keyword: string }>;
@@ -30,6 +36,7 @@ export async function generateMetadata({ params }: MetadataProps): Promise<Metad
       robots: { index: false, follow: true },
     };
   }
+  const ogImage = "/og-cover.jpg";
 
   return {
     title: `${kw} 相关公司调研`,
@@ -41,11 +48,13 @@ export async function generateMetadata({ params }: MetadataProps): Promise<Metad
       description: `查看关键词“${kw}”在公司研究报告中的命中内容与关联公司。`,
       url: canonical,
       locale: "zh_CN",
+      images: [ogImage],
     },
     twitter: {
       card: "summary_large_image",
       title: `${kw} 相关公司调研`,
       description: `查看关键词“${kw}”在公司研究报告中的命中内容与关联公司。`,
+      images: [ogImage],
     },
   };
 }
@@ -55,7 +64,7 @@ export default async function TopicKeywordPage({ params }: PageProps) {
   const kw = decodeKeyword(keyword);
   if (!kw) notFound();
 
-  const items = await searchKeywordHits(kw, 60);
+  const items = await getCachedKeywordHits(kw, 60);
   if (items.length === 0) {
     notFound();
   }
@@ -110,4 +119,3 @@ export default async function TopicKeywordPage({ params }: PageProps) {
     </main>
   );
 }
-

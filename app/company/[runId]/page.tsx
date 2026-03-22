@@ -1,10 +1,21 @@
 import type { Metadata } from "next";
+import { unstable_cache } from "next/cache";
 import { notFound } from "next/navigation";
 import { getLatestRunByTicker, getResearchRun } from "@/lib/research";
 import { getSiteUrl } from "@/lib/server/site-url";
 import ReportView from "../report-view";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 1800;
+const getCachedResearchRun = unstable_cache(
+  async (runId: string) => getResearchRun(runId),
+  ["research-run-by-id"],
+  { revalidate }
+);
+const getCachedLatestRunByTicker = unstable_cache(
+  async (ticker: string) => getLatestRunByTicker(ticker),
+  ["latest-run-by-ticker"],
+  { revalidate }
+);
 
 type PageProps = {
   params: Promise<{ runId: string }>;
@@ -57,7 +68,7 @@ function toArticleJsonLd(
 export async function generateMetadata({ params }: MetadataProps): Promise<Metadata> {
   const { runId } = await params;
   const decodedRunId = decodeURIComponent(runId);
-  const run = await getResearchRun(decodedRunId);
+  const run = await getCachedResearchRun(decodedRunId);
   const fallbackCanonical = `/company/${encodeURIComponent(decodedRunId)}`;
 
   if (!run) {
@@ -70,10 +81,11 @@ export async function generateMetadata({ params }: MetadataProps): Promise<Metad
   }
 
   const canonicalPath = `/stock/${encodeURIComponent(run.ticker.toUpperCase())}`;
-  const latest = await getLatestRunByTicker(run.ticker);
+  const latest = await getCachedLatestRunByTicker(run.ticker);
   const isLatest = latest?.runId === run.runId;
   const title = `${run.company}（${run.ticker}）调研报告`;
   const description = buildMetaDescription(run);
+  const ogImage = "/og-cover.jpg";
 
   return {
     title,
@@ -85,11 +97,13 @@ export async function generateMetadata({ params }: MetadataProps): Promise<Metad
       description,
       url: canonicalPath,
       locale: "zh_CN",
+      images: [ogImage],
     },
     twitter: {
       card: "summary_large_image",
       title,
       description,
+      images: [ogImage],
     },
     robots: isLatest ? { index: true, follow: true } : { index: false, follow: true },
   };
@@ -99,7 +113,7 @@ export default async function CompanyPage({ params, searchParams }: PageProps) {
   const { runId } = await params;
   const query = await searchParams;
   const decodedRunId = decodeURIComponent(runId);
-  const run = await getResearchRun(decodedRunId);
+  const run = await getCachedResearchRun(decodedRunId);
   if (!run) notFound();
 
   const siteUrl = getSiteUrl();
@@ -119,4 +133,3 @@ export default async function CompanyPage({ params, searchParams }: PageProps) {
     </>
   );
 }
-

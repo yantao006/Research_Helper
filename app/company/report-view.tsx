@@ -271,9 +271,9 @@ export default function ReportView({
           </aside>
 
           <article className="tab-panel docs-main">
-            <h1 className="docs-main-title">
+            <h2 className="docs-main-title">
               {activeDoc.id}. {activeDoc.question}
-            </h1>
+            </h2>
             {seoSection.keywords.length > 0 ? (
               <>
                 <nav className="doc-keyword-jumps" aria-label="关键词命中导航">
@@ -306,10 +306,10 @@ export default function ReportView({
                 remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
                 rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema]]}
                 components={{
-                  h1: ({ children }) => renderHeading(1, children),
-                  h2: ({ children }) => renderHeading(2, children),
-                  h3: ({ children }) => renderHeading(3, children),
-                  h4: ({ children }) => renderHeading(4, children),
+                  h1: ({ children }) => renderHeading(2, children),
+                  h2: ({ children }) => renderHeading(3, children),
+                  h3: ({ children }) => renderHeading(4, children),
+                  h4: ({ children }) => renderHeading(5, children),
                   table: ({ children }) => (
                     <div className="table-wrap">
                       <table>{children}</table>

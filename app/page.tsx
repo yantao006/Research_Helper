@@ -1,15 +1,34 @@
 import type { Metadata } from "next";
+import { unstable_cache } from "next/cache";
 import { getResearchRuns } from "@/lib/research";
 import { isResearchJobsEnabled } from "@/lib/server/runtime-flags";
 import { getSiteUrl } from "@/lib/server/site-url";
 import HomeDashboard from "./home-dashboard";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 300;
+const getCachedResearchRuns = unstable_cache(
+  async () => getResearchRuns(),
+  ["research-runs-home"],
+  { revalidate }
+);
+
 export const metadata: Metadata = {
   title: "上市公司调研结果与搜索",
   description: "快速检索公司代码或名称，查看已生成的上市公司调研结论与历史研究内容。",
   alternates: {
     canonical: "/",
+  },
+  openGraph: {
+    title: "上市公司调研结果与搜索",
+    description: "快速检索公司代码或名称，查看已生成的上市公司调研结论与历史研究内容。",
+    url: "/",
+    images: ["/og-cover.jpg"],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "上市公司调研结果与搜索",
+    description: "快速检索公司代码或名称，查看已生成的上市公司调研结论与历史研究内容。",
+    images: ["/og-cover.jpg"],
   },
 };
 
@@ -19,7 +38,7 @@ type HomePageProps = {
 
 export default async function HomePage({ searchParams }: HomePageProps) {
   const query = await searchParams;
-  const runs = await getResearchRuns();
+  const runs = await getCachedResearchRuns();
   const initialQuery = (query.kw || query.q || "").trim();
   const researchJobsEnabled = isResearchJobsEnabled();
   const siteUrl = getSiteUrl();
