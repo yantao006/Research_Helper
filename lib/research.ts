@@ -58,6 +58,7 @@ type TaskLookup = {
 
 const OUTPUT_ROOT = path.join(process.cwd(), "output");
 const TASKS_CSV = path.join(process.cwd(), "tasks.csv");
+let warnedNoDsn = false;
 
 const CHINA_TICKER_CN_NAME: Record<string, string> = {
   "01357.HK": "美图公司",
@@ -494,9 +495,17 @@ export async function getResearchRuns(): Promise<ResearchRun[]> {
       if (pgRuns.length > 0) {
         return pgRuns;
       }
+      console.warn(
+        "Postgres is configured but returned 0 research runs. Falling back to local output."
+      );
     } catch (error) {
       console.error("Failed to load research runs from postgres. Falling back to local output.", error);
     }
+  } else if (!warnedNoDsn) {
+    warnedNoDsn = true;
+    console.warn(
+      "POSTGRES_DSN/DATABASE_URL is not configured. Research pages will read local output only."
+    );
   }
 
   return getResearchRunsFromLocal();
