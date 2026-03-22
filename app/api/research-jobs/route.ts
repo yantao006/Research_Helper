@@ -2,6 +2,7 @@ import fs from "fs";
 import { spawn } from "child_process";
 import { NextRequest, NextResponse } from "next/server";
 import path from "path";
+import { isResearchAdminRequest } from "@/lib/server/admin-auth";
 import { appendLog, createJob, updateJob } from "@/lib/server/research-jobs";
 import { isResearchJobsEnabled } from "@/lib/server/runtime-flags";
 import { upsertTaskRow } from "@/lib/server/tasks-admin";
@@ -61,6 +62,9 @@ export async function POST(request: NextRequest) {
       { status: 403 }
     );
   }
+  if (!isResearchAdminRequest(request)) {
+    return NextResponse.json({ error: "admin auth required" }, { status: 401 });
+  }
   if (isRateLimited(request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null)) {
     return NextResponse.json({ error: "too many requests" }, { status: 429 });
   }
@@ -70,12 +74,14 @@ export async function POST(request: NextRequest) {
     ticker?: string;
     provider?: string;
     reportDate?: string;
+    forceRerun?: boolean;
   };
 
   const company = (body.company || "").trim();
   const ticker = (body.ticker || "").trim().toUpperCase();
   const provider = (body.provider || "doubao").trim();
   const reportDate = (body.reportDate || shanghaiDate()).trim();
+  const forceRerun = Boolean(body.forceRerun);
 
   if (!company || company.length > 120 || !ticker || ticker.length > 24) {
     return NextResponse.json({ error: "company and ticker are required" }, { status: 400 });
@@ -106,6 +112,9 @@ export async function POST(request: NextRequest) {
     "--only-ticker",
     ticker,
   ];
+  if (forceRerun) {
+    cliArgs.push("--force-rerun");
+  }
   if (fs.existsSync(routerConfigPath)) {
     cliArgs.push("--router-config", "prompt_router.yaml");
     if (fs.existsSync(industryPromptsPath)) {

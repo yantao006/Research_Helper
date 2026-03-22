@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { unstable_cache } from "next/cache";
 import { getResearchRuns } from "@/lib/research";
+import { getResearchAdminSession, isResearchAdminConfigured } from "@/lib/server/admin-auth";
 import { isResearchJobsEnabled } from "@/lib/server/runtime-flags";
 import { getSiteUrl } from "@/lib/server/site-url";
 import HomeDashboard from "./home-dashboard";
@@ -41,6 +42,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const runs = await getCachedResearchRuns();
   const initialQuery = (query.kw || query.q || "").trim();
   const researchJobsEnabled = isResearchJobsEnabled();
+  const adminConfigured = isResearchAdminConfigured();
+  const canManageResearch = adminConfigured && (await getResearchAdminSession());
   const siteUrl = getSiteUrl();
   const websiteJsonLd = JSON.stringify({
     "@context": "https://schema.org",
@@ -67,6 +70,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
           runs={runs}
           initialQuery={initialQuery}
           researchJobsEnabled={researchJobsEnabled}
+          canManageResearch={canManageResearch}
+          adminConfigured={adminConfigured}
         />
       )}
     </main>

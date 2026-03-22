@@ -9,6 +9,8 @@ type Props = {
   runs: ResearchRun[];
   initialQuery?: string;
   researchJobsEnabled: boolean;
+  canManageResearch: boolean;
+  adminConfigured: boolean;
 };
 
 type SearchItem = {
@@ -86,7 +88,13 @@ function marketFromTicker(ticker: string): string {
   return "美股";
 }
 
-export default function HomeDashboard({ runs, initialQuery = "", researchJobsEnabled }: Props) {
+export default function HomeDashboard({
+  runs,
+  initialQuery = "",
+  researchJobsEnabled,
+  canManageResearch,
+  adminConfigured,
+}: Props) {
   const router = useRouter();
   const [query, setQuery] = useState(initialQuery);
   const [searchItems, setSearchItems] = useState<SearchItem[]>([]);
@@ -229,7 +237,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
 
   useEffect(() => {
     if (latestRuns.length === 0) return;
-    const loadQuotes = async () => {
+  const loadQuotes = async () => {
       const tickers = latestRuns.map((run) => run.ticker).join(",");
       const response = await fetch(`/api/quotes?tickers=${encodeURIComponent(tickers)}`);
       if (!response.ok) return;
@@ -254,8 +262,16 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
     loadQuotes();
   }, [latestRuns]);
 
-  const startResearch = async (target: SearchItem | null = selectedItem) => {
-    if (!researchJobsEnabled) return;
+  const logoutAdmin = async () => {
+    await fetch("/api/admin/logout", { method: "POST" });
+    router.refresh();
+  };
+
+  const startResearch = async (
+    target: SearchItem | null = selectedItem,
+    options?: { forceRerun?: boolean }
+  ) => {
+    if (!researchJobsEnabled || !canManageResearch) return;
     if (!target) return;
     setIsStarting(true);
     try {
@@ -267,6 +283,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
           ticker: target.ticker,
           provider: "doubao",
           reportDate: shanghaiDate(),
+          forceRerun: Boolean(options?.forceRerun),
         }),
       });
       if (!response.ok) throw new Error("启动调研任务失败");
@@ -304,11 +321,11 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
     if (!hasQuery) return "开始搜索";
     if (selectedItem?.researched) return "查看调研结果";
     if (selectedItem && !selectedItem.researched) {
-      return researchJobsEnabled ? (isStarting ? "启动中..." : "开始调研") : "仅展示已调研";
+      return researchJobsEnabled && canManageResearch ? (isStarting ? "启动中..." : "开始调研") : "仅展示已调研";
     }
     if (selectedKeywordHit) return "查看关键词结果";
     if (canStartFromTicker && inferredTicker) {
-      return researchJobsEnabled ? (isStarting ? "启动中..." : `调研 ${inferredTicker}`) : "仅展示已调研";
+      return researchJobsEnabled && canManageResearch ? (isStarting ? "启动中..." : `调研 ${inferredTicker}`) : "仅展示已调研";
     }
     return "请输入更准确关键词";
   })();
@@ -323,7 +340,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
       return;
     }
     if (selectedItem && !selectedItem.researched) {
-      if (researchJobsEnabled) {
+      if (researchJobsEnabled && canManageResearch) {
         void startResearch(selectedItem);
       }
       return;
@@ -333,7 +350,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
       return;
     }
     if (canStartFromTicker && inferredTicker) {
-      if (researchJobsEnabled) {
+      if (researchJobsEnabled && canManageResearch) {
         void startResearch({
           company: queryText,
           ticker: inferredTicker,
@@ -377,7 +394,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
               className="home-search-go"
               disabled={
                 isStarting ||
-                (!researchJobsEnabled &&
+                ((!researchJobsEnabled || !canManageResearch) &&
                   !selectedKeywordHit &&
                   ((selectedItem && !selectedItem.researched) || (canStartFromTicker && !selectedItem))) ||
                 (hasQuery &&
@@ -395,9 +412,28 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
           <div className="home-kpis">
             <span>已调研 {researchedCount} 家</span>
             <span>最新更新 {latestDate}</span>
-            {!researchJobsEnabled ? <span>当前站点为公开只读模式</span> : null}
+            {!canManageResearch ? (
+              <span>
+                {adminConfigured ? "当前站点为公开只读模式，管理操作需先登录" : "当前站点为公开只读模式"}
+              </span>
+            ) : null}
             {hasQuery ? <span>{searching ? "检索中..." : `匹配建议 ${hitCount} 条`}</span> : null}
           </div>
+          {canManageResearch ? (
+            <div className="home-admin-entry">
+              <span className="meta">当前处于管理员模式，可发起新调研或更新已有调研。</span>
+              <button type="button" className="home-inline-action" onClick={() => void logoutAdmin()}>
+                退出登录
+              </button>
+            </div>
+          ) : null}
+          {!canManageResearch && adminConfigured ? (
+            <div className="home-admin-entry">
+              <Link href={`/admin?next=${encodeURIComponent(`/?q=${queryText || ""}`)}`} className="home-inline-action">
+                管理员登录后可发起或更新调研
+              </Link>
+            </div>
+          ) : null}
           <div className="home-quick-chips">
             <span className="meta">试试：</span>
             {quickChips.map((chip) => (
@@ -466,7 +502,7 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
             {searchItems.length === 0 && keywordHitCount === 0 ? (
               <div className="home-empty-suggest">
                 <div className="meta">未找到匹配公司，可尝试完整股票代码（示例：600519.SH / 09992.HK / AAPL）。</div>
-                {inferredTicker && researchJobsEnabled ? (
+                {inferredTicker && researchJobsEnabled && canManageResearch ? (
                   <button
                     type="button"
                     className="home-cta-btn"
@@ -520,18 +556,30 @@ export default function HomeDashboard({ runs, initialQuery = "", researchJobsEna
                   <button type="button" className="home-cta-btn" onClick={() => openResearchedRun(selectedItem)}>
                     查看调研结果
                   </button>
-                ) : researchJobsEnabled ? (
-                  <button
-                    type="button"
-                    className="home-cta-btn"
-                    disabled={isStarting}
-                    onClick={() => startResearch(selectedItem)}
-                  >
-                    {isStarting ? "启动中..." : "开始调研并同步飞书"}
-                  </button>
+                ) : researchJobsEnabled && canManageResearch ? (
+                  <div className="home-suggest-buttons">
+                    <button
+                      type="button"
+                      className="home-cta-btn"
+                      disabled={isStarting}
+                      onClick={() => startResearch(selectedItem)}
+                    >
+                      {isStarting ? "启动中..." : "开始调研并同步飞书"}
+                    </button>
+                  </div>
                 ) : (
                   <span className="meta">当前为对外展示环境，暂不开放在线发起调研。</span>
                 )}
+                {selectedItem.researched && researchJobsEnabled && canManageResearch ? (
+                  <button
+                    type="button"
+                    className="home-inline-action"
+                    disabled={isStarting}
+                    onClick={() => startResearch(selectedItem, { forceRerun: true })}
+                  >
+                    {isStarting ? "更新中..." : "更新该公司调研"}
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </div>
