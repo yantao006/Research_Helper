@@ -6,7 +6,6 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import type { ResearchRun } from "@/lib/research";
 import DocToc from "./[runId]/toc-nav";
-import SectionNav from "./section-nav";
 
 type TocItem = {
   id: string;
@@ -227,30 +226,14 @@ export default function ReportView({
   const seoSection = extractSeoSection(activeDoc.answer || "");
   const highlightResult = highlightMarkdownKeywords(seoSection.body, seoSection.keywords);
   const toc = extractMarkdownToc(seoSection.body || "");
-  const sectionNavItems = [
-    {
-      id: "facts",
-      label: "事实",
-      meta: run.factPack?.coverageScore ? `覆盖度 ${run.factPack.coverageScore}` : undefined,
-    },
-    {
-      id: "changes",
-      label: "变化",
-      meta: run.delta?.highlights.length ? `${run.delta.highlights.length} 条` : "暂无",
-    },
-    {
-      id: "insights",
-      label: "观点",
-      meta: run.insightSummary?.relatedDocs.length
-        ? `${run.insightSummary.relatedDocs.length} 篇关联`
-        : undefined,
-    },
-    {
-      id: "full-report",
-      label: "全文",
-      meta: `${run.docs.length} 篇文档`,
-    },
-  ];
+  const factNavItems = [
+    { id: "facts-summary", label: "Company Fact Pack", show: Boolean(run.factPack?.summaryMarkdown) },
+    { id: "facts-financials", label: "关键财务", show: (run.factPack?.keyFinancials.length || 0) > 0 },
+    { id: "facts-catalysts", label: "近期催化", show: (run.factPack?.recentCatalysts.length || 0) > 0 },
+    { id: "facts-valuation", label: "估值快照", show: (run.factPack?.valuationSnapshot.length || 0) > 0 },
+    { id: "facts-risks", label: "核心风险", show: (run.factPack?.topRisks.length || 0) > 0 },
+    { id: "facts-tracking", label: "跟踪清单", show: (run.factPack?.trackingItems.length || 0) > 0 },
+  ].filter((item) => item.show);
   const renderMarkdownBlock = (markdown: string, headingBaseLevel = 2) => {
     const headingSeen = new Map<string, number>();
     const renderHeading = (level: number, children: React.ReactNode) => {
@@ -330,11 +313,55 @@ export default function ReportView({
         </div>
       </section>
 
-      <SectionNav items={sectionNavItems} />
+      <div className="report-page-layout">
+        <aside className="report-page-left">
+          <section className="report-side-card">
+            <div className="report-side-title">事实层</div>
+            <nav className="report-side-list">
+              {factNavItems.map((item) => (
+                <a key={item.id} className="report-side-link" href={`#${item.id}`}>
+                  {item.label}
+                </a>
+              ))}
+            </nav>
+          </section>
 
-      <section id="facts" className="panel report-layers">
-        <div className="report-layer-grid">
-          <section className="report-layer-card report-layer-card-facts">
+          <section className="report-side-card">
+            <div className="report-side-title">变化层</div>
+            <nav className="report-side-list">
+              <a className="report-side-link" href="#changes">
+                {run.delta?.highlights.length ? `变化摘要 ${run.delta.highlights.length} 条` : "暂无历史变化"}
+              </a>
+            </nav>
+          </section>
+
+          <section className="report-side-card">
+            <div className="report-side-title">观点层</div>
+            <nav className="report-side-list">
+              <a className="report-side-link" href="#insights">
+                {run.insightSummary?.oneLiner ? "核心观点" : "观点摘要"}
+              </a>
+            </nav>
+          </section>
+
+          <section className="report-side-card">
+            <div className="report-side-title">全文研究</div>
+            <nav className="report-side-list">
+              {run.docs.map((doc, index) => (
+                <Link
+                  key={doc.fileName}
+                  className={`report-side-link ${index === activeIndex ? "is-active" : ""}`}
+                  href={`${basePath}?tab=${encodeURIComponent(doc.id)}#full-report`}
+                >
+                  {doc.id}. {doc.question}
+                </Link>
+              ))}
+            </nav>
+          </section>
+        </aside>
+
+        <div className="report-page-main">
+          <section id="facts" className="panel report-section-panel">
             <div className="report-layer-head">
               <div>
                 <div className="report-layer-kicker">Facts</div>
@@ -350,9 +377,15 @@ export default function ReportView({
             </div>
             {run.factPack ? (
               <>
-                <div className="report-fact-groups">
+                <div id="facts-summary" className="report-fact-summary">
+                  <div className="report-fact-label">Company Fact Pack</div>
+                  <div className="markdown-body report-layer-markdown report-layer-markdown-compact">
+                    {renderMarkdownBlock(run.factPack.summaryMarkdown, 3)}
+                  </div>
+                </div>
+                <div className="report-fact-stack">
                   {run.factPack.keyFinancials.length > 0 ? (
-                    <div className="report-fact-group">
+                    <div id="facts-financials" className="report-fact-group report-fact-group-row">
                       <div className="report-fact-label">关键财务</div>
                       <ul>
                         {run.factPack.keyFinancials.map((item) => (
@@ -362,7 +395,7 @@ export default function ReportView({
                     </div>
                   ) : null}
                   {run.factPack.recentCatalysts.length > 0 ? (
-                    <div className="report-fact-group">
+                    <div id="facts-catalysts" className="report-fact-group report-fact-group-row">
                       <div className="report-fact-label">近期催化</div>
                       <ul>
                         {run.factPack.recentCatalysts.map((item) => (
@@ -372,7 +405,7 @@ export default function ReportView({
                     </div>
                   ) : null}
                   {run.factPack.valuationSnapshot.length > 0 ? (
-                    <div className="report-fact-group">
+                    <div id="facts-valuation" className="report-fact-group report-fact-group-row">
                       <div className="report-fact-label">估值快照</div>
                       <ul>
                         {run.factPack.valuationSnapshot.map((item) => (
@@ -382,7 +415,7 @@ export default function ReportView({
                     </div>
                   ) : null}
                   {run.factPack.topRisks.length > 0 ? (
-                    <div className="report-fact-group">
+                    <div id="facts-risks" className="report-fact-group report-fact-group-row">
                       <div className="report-fact-label">核心风险</div>
                       <ul>
                         {run.factPack.topRisks.map((item) => (
@@ -392,7 +425,7 @@ export default function ReportView({
                     </div>
                   ) : null}
                   {run.factPack.trackingItems.length > 0 ? (
-                    <div className="report-fact-group">
+                    <div id="facts-tracking" className="report-fact-group report-fact-group-row">
                       <div className="report-fact-label">跟踪清单</div>
                       <ul>
                         {run.factPack.trackingItems.map((item) => (
@@ -402,16 +435,13 @@ export default function ReportView({
                     </div>
                   ) : null}
                 </div>
-                <div className="markdown-body report-layer-markdown">
-                  {renderMarkdownBlock(run.factPack.summaryMarkdown, 3)}
-                </div>
               </>
             ) : (
               <div className="empty">当前未加载到事实包摘要。</div>
             )}
           </section>
 
-          <section id="changes" className="report-layer-card report-layer-card-changes">
+          <section id="changes" className="panel report-section-panel">
             <div className="report-layer-head">
               <div>
                 <div className="report-layer-kicker">Changes</div>
@@ -443,7 +473,7 @@ export default function ReportView({
             )}
           </section>
 
-          <section id="insights" className="report-layer-card report-layer-card-insights">
+          <section id="insights" className="panel report-section-panel">
             <div className="report-layer-head">
               <div>
                 <div className="report-layer-kicker">Insights</div>
@@ -480,28 +510,15 @@ export default function ReportView({
               <div className="empty">当前没有提炼出观点摘要，将直接展示下方全文。</div>
             )}
           </section>
-        </div>
-      </section>
 
-      <section id="full-report" className="panel docs-surface">
-        <div className="docs-layout">
-          <aside className="docs-left-nav">
-            <div className="docs-nav-title">全文研究</div>
-            <div className="docs-nav-list" role="tablist" aria-label="调研类别">
-              {run.docs.map((doc, index) => (
-                <Link
-                  key={doc.fileName}
-                  className={`docs-nav-item ${index === activeIndex ? "is-active" : ""}`}
-                  href={`${basePath}?tab=${encodeURIComponent(doc.id)}`}
-                >
-                  <span className="docs-nav-id">{doc.id}</span>
-                  <span className="docs-nav-text">{doc.question}</span>
-                </Link>
-              ))}
-            </div>
-          </aside>
-
-          <article className="tab-panel docs-main">
+          <section id="full-report" className="panel docs-surface docs-surface-standalone">
+            <article className="tab-panel docs-main docs-main-standalone">
+              <div className="report-layer-head report-full-head">
+                <div>
+                  <div className="report-layer-kicker">Full Report</div>
+                  <h2 className="report-layer-title">全文层</h2>
+                </div>
+              </div>
             <h2 className="docs-main-title">
               {activeDoc.id}. {activeDoc.question}
             </h2>
@@ -559,11 +576,12 @@ export default function ReportView({
                 <li>研究团队：Research Helper AI 研究引擎 + 人工复核流程。</li>
               </ul>
             </section>
-          </article>
-
-          <DocToc toc={toc} />
+            </article>
+          </section>
         </div>
-      </section>
+
+        <DocToc toc={toc} />
+      </div>
     </main>
   );
 }

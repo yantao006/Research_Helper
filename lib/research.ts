@@ -622,79 +622,9 @@ function parseIndustryFromMarkdown(markdown: string): string {
   return "";
 }
 
-async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
-  const pool = getPostgresPool();
-  if (!pool) {
-    return [];
-  }
-
-  const queryFactPacks = async (): Promise<DbFactPackRow[]> => {
-    try {
-      const result = await pool.query<DbFactPackRow>(
-        `
-          SELECT
-            company,
-            ticker,
-            report_date,
-            collected_at,
-            collected_with_web_search,
-            payload_json,
-            summary_markdown,
-            delta_summary_markdown
-          FROM rb_fact_packs
-        `
-      );
-      return result.rows;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!message.includes("delta_summary_markdown")) {
-        throw error;
-      }
-      const fallback = await pool.query<Omit<DbFactPackRow, "delta_summary_markdown">>(
-        `
-          SELECT
-            company,
-            ticker,
-            report_date,
-            collected_at,
-            collected_with_web_search,
-            payload_json,
-            summary_markdown
-          FROM rb_fact_packs
-        `
-      );
-      return fallback.rows.map((row) => ({
-        ...row,
-        delta_summary_markdown: "",
-      }));
-    }
-  };
-
-  const [docsResult, factRows, taskLookup] = await Promise.all([
-    pool.query<DbDocRow>(
-      `
-        SELECT
-          company,
-          ticker,
-          report_date,
-          prompt_id,
-          question,
-          answer_markdown,
-          sources_json,
-          provider,
-          model,
-          output_path,
-          markdown
-        FROM rb_docs
-        ORDER BY report_date DESC, ticker ASC, prompt_id ASC
-      `
-    ),
-    queryFactPacks(),
-    readTaskLookupFromDb(),
-  ]);
-
+function buildFactPackMap(rows: DbFactPackRow[]): Map<string, ResearchFactPack> {
   const factByRunId = new Map<string, ResearchFactPack>();
-  for (const row of factRows) {
+  for (const row of rows) {
     const ticker = (row.ticker || "").trim();
     const reportDate = (row.report_date || "").trim();
     if (!ticker || !reportDate) continue;
@@ -709,9 +639,17 @@ async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
       })
     );
   }
+  return factByRunId;
+}
 
+function buildRunsFromDbRows(
+  docsRows: DbDocRow[],
+  factRows: DbFactPackRow[],
+  taskLookup: TaskLookup
+): ResearchRun[] {
+  const factByRunId = buildFactPackMap(factRows);
   const byRunId = new Map<string, ResearchRun>();
-  for (const row of docsResult.rows) {
+  for (const row of docsRows) {
     const ticker = (row.ticker || "").trim();
     const reportDate = (row.report_date || "").trim();
     if (!ticker || !reportDate) {
@@ -784,6 +722,87 @@ async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
   return runs;
 }
 
+async function queryFactPacksFromDb(
+  pool: NonNullable<ReturnType<typeof getPostgresPool>>,
+  whereClause = "",
+  params: Array<string> = []
+): Promise<DbFactPackRow[]> {
+  try {
+    const result = await pool.query<DbFactPackRow>(
+      `
+        SELECT
+          company,
+          ticker,
+          report_date,
+          collected_at,
+          collected_with_web_search,
+          payload_json,
+          summary_markdown,
+          delta_summary_markdown
+        FROM rb_fact_packs
+        ${whereClause}
+      `,
+      params
+    );
+    return result.rows;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("delta_summary_markdown")) {
+      throw error;
+    }
+    const fallback = await pool.query<Omit<DbFactPackRow, "delta_summary_markdown">>(
+      `
+        SELECT
+          company,
+          ticker,
+          report_date,
+          collected_at,
+          collected_with_web_search,
+          payload_json,
+          summary_markdown
+        FROM rb_fact_packs
+        ${whereClause}
+      `,
+      params
+    );
+    return fallback.rows.map((row) => ({
+      ...row,
+      delta_summary_markdown: "",
+    }));
+  }
+}
+
+async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
+  const pool = getPostgresPool();
+  if (!pool) {
+    return [];
+  }
+
+  const [docsResult, factRows, taskLookup] = await Promise.all([
+    pool.query<DbDocRow>(
+      `
+        SELECT
+          company,
+          ticker,
+          report_date,
+          prompt_id,
+          question,
+          answer_markdown,
+          sources_json,
+          provider,
+          model,
+          output_path,
+          markdown
+        FROM rb_docs
+        ORDER BY report_date DESC, ticker ASC, prompt_id ASC
+      `
+    ),
+    queryFactPacksFromDb(pool),
+    readTaskLookupFromDb(),
+  ]);
+  return buildRunsFromDbRows(docsResult.rows, factRows, taskLookup);
+}
+
 export async function getResearchRuns(): Promise<ResearchRun[]> {
   const cacheMs = readRunsCacheMs();
   const cache = getRunsCacheState();
@@ -829,6 +848,51 @@ export async function getResearchRuns(): Promise<ResearchRun[]> {
 }
 
 export async function getResearchRun(runId: string): Promise<ResearchRun | null> {
+  if (hasPostgresDsn()) {
+    try {
+      const pool = getPostgresPool();
+      if (pool) {
+        const reportDate = runId.match(/(\d{4}-\d{2}-\d{2})$/)?.[1] || "";
+        if (reportDate) {
+          const docsResult = await pool.query<DbDocRow>(
+            `
+              SELECT
+                company,
+                ticker,
+                report_date,
+                prompt_id,
+                question,
+                answer_markdown,
+                sources_json,
+                provider,
+                model,
+                output_path,
+                markdown
+              FROM rb_docs
+              WHERE report_date = $1
+              ORDER BY ticker ASC, prompt_id ASC
+            `,
+            [reportDate]
+          );
+          const filteredDocs = docsResult.rows.filter(
+            (row) => toRunId((row.ticker || "").trim(), (row.report_date || "").trim()) === runId
+          );
+          if (filteredDocs.length > 0) {
+            const ticker = (filteredDocs[0].ticker || "").trim();
+            const factRows = await queryFactPacksFromDb(
+              pool,
+              "WHERE ticker = $1 AND report_date = $2",
+              [ticker, reportDate]
+            );
+            const taskLookup = await readTaskLookupFromDb();
+            return buildRunsFromDbRows(filteredDocs, factRows, taskLookup)[0] ?? null;
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Failed direct getResearchRun lookup from postgres. Falling back to cached runs.", error);
+    }
+  }
   const runs = await getResearchRuns();
   return runs.find((run) => run.runId === runId) ?? null;
 }
@@ -836,6 +900,49 @@ export async function getResearchRun(runId: string): Promise<ResearchRun | null>
 export async function getLatestRunByTicker(ticker: string): Promise<ResearchRun | null> {
   const normalized = ticker.trim().toUpperCase();
   if (!normalized) return null;
+  if (hasPostgresDsn()) {
+    try {
+      const pool = getPostgresPool();
+      if (pool) {
+        const docsResult = await pool.query<DbDocRow>(
+          `
+            SELECT
+              company,
+              ticker,
+              report_date,
+              prompt_id,
+              question,
+              answer_markdown,
+              sources_json,
+              provider,
+              model,
+              output_path,
+              markdown
+            FROM rb_docs
+            WHERE UPPER(ticker) = $1
+            ORDER BY report_date DESC, prompt_id ASC
+          `,
+          [normalized]
+        );
+        if (docsResult.rows.length > 0) {
+          const latestDate = (docsResult.rows[0].report_date || "").trim();
+          const latestDocs = docsResult.rows.filter((row) => (row.report_date || "").trim() === latestDate);
+          const factRows = await queryFactPacksFromDb(
+            pool,
+            "WHERE UPPER(ticker) = $1 AND report_date = $2",
+            [normalized, latestDate]
+          );
+          const taskLookup = await readTaskLookupFromDb();
+          return buildRunsFromDbRows(latestDocs, factRows, taskLookup)[0] ?? null;
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Failed direct getLatestRunByTicker lookup from postgres. Falling back to cached runs.",
+        error
+      );
+    }
+  }
   const runs = await getResearchRuns();
   const matched = runs.filter((run) => run.ticker.trim().toUpperCase() === normalized);
   if (matched.length === 0) return null;
