@@ -59,6 +59,32 @@ type TaskLookup = {
 const OUTPUT_ROOT = path.join(process.cwd(), "output");
 const TASKS_CSV = path.join(process.cwd(), "tasks.csv");
 let warnedNoDsn = false;
+type ResearchRunsCacheState = {
+  expiresAt: number;
+  value: ResearchRun[];
+  inFlight?: Promise<ResearchRun[]>;
+};
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __researchRunsCacheState: ResearchRunsCacheState | undefined;
+}
+
+function readRunsCacheMs(): number {
+  const raw = (process.env.RESEARCH_RUNS_CACHE_MS || "").trim();
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return Math.floor(parsed);
+  }
+  return 15_000;
+}
+
+function getRunsCacheState(): ResearchRunsCacheState {
+  if (!global.__researchRunsCacheState) {
+    global.__researchRunsCacheState = { expiresAt: 0, value: [] };
+  }
+  return global.__researchRunsCacheState;
+}
 
 const CHINA_TICKER_CN_NAME: Record<string, string> = {
   "01357.HK": "美图公司",
@@ -489,26 +515,47 @@ async function getResearchRunsFromDb(): Promise<ResearchRun[]> {
 }
 
 export async function getResearchRuns(): Promise<ResearchRun[]> {
-  if (hasPostgresDsn()) {
-    try {
-      const pgRuns = await getResearchRunsFromDb();
-      if (pgRuns.length > 0) {
-        return pgRuns;
-      }
-      console.warn(
-        "Postgres is configured but returned 0 research runs. Falling back to local output."
-      );
-    } catch (error) {
-      console.error("Failed to load research runs from postgres. Falling back to local output.", error);
-    }
-  } else if (!warnedNoDsn) {
-    warnedNoDsn = true;
-    console.warn(
-      "POSTGRES_DSN/DATABASE_URL is not configured. Research pages will read local output only."
-    );
+  const cacheMs = readRunsCacheMs();
+  const cache = getRunsCacheState();
+  const now = Date.now();
+  if (cacheMs > 0 && cache.expiresAt > now) {
+    return cache.value;
+  }
+  if (cache.inFlight) {
+    return cache.inFlight;
   }
 
-  return getResearchRunsFromLocal();
+  cache.inFlight = (async () => {
+    if (hasPostgresDsn()) {
+      try {
+        const pgRuns = await getResearchRunsFromDb();
+        if (pgRuns.length > 0) {
+          return pgRuns;
+        }
+        console.warn(
+          "Postgres is configured but returned 0 research runs. Falling back to local output."
+        );
+      } catch (error) {
+        console.error("Failed to load research runs from postgres. Falling back to local output.", error);
+      }
+    } else if (!warnedNoDsn) {
+      warnedNoDsn = true;
+      console.warn(
+        "POSTGRES_DSN/DATABASE_URL is not configured. Research pages will read local output only."
+      );
+    }
+
+    return getResearchRunsFromLocal();
+  })();
+
+  try {
+    const value = await cache.inFlight;
+    cache.value = value;
+    cache.expiresAt = cacheMs > 0 ? Date.now() + cacheMs : 0;
+    return value;
+  } finally {
+    cache.inFlight = undefined;
+  }
 }
 
 export async function getResearchRun(runId: string): Promise<ResearchRun | null> {
